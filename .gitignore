@@ -11,3 +11,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 .vite/
+__pycache__/
+*.pyc
+backend/.venv/
+backend/.runtime/
+backend/backend/
+.claude/

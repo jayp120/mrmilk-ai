@@ -9,6 +9,8 @@ import { GraphicComponent, GridComponent, LegendComponent, TooltipComponent, Vis
 import { CanvasRenderer } from "echarts/renderers";
 import { captureChatAudit } from "./mrmilk-chat-audit.js";
 import ContentStudio from "./src/ContentStudio.jsx";
+import ImportCenter from "./src/ImportCenter.jsx";
+import { fetchCustomerRecords, fetchCustomerSummary, proxyChat } from "./src/utils/importApi.js";
 
 echarts.use([BarChart, LineChart, PieChart, ScatterChart, TreemapChart, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, CanvasRenderer]);
 
@@ -3229,79 +3231,16 @@ const getDefaultModel = (provider) => PROVIDER_META[provider]?.defaultModel || P
 
 const requestModelText = async ({ provider, model, apiKey, instructions, inputText, history = [] }) => {
   const selectedModel = normalizeProviderModel(provider, model || getDefaultModel(provider));
-  if (provider === "gemini") {
-    const contents = [
-      ...history.map((m) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: toText(m.content) }]
-      })),
-      { role: "user", parts: [{ text: inputText }] }
-    ];
-    const geminiBody = {
-      systemInstruction: { parts: [{ text: instructions }] },
-      contents
-    };
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
-    const r = await fetch(geminiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(geminiBody)
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `Gemini request failed (${r.status})`);
-    const text = extractGeminiText(d);
-    if (!text) throw new Error("No response text was returned by Gemini.");
-    return { text, usedSearch: false };
-  }
-
-  if (provider === "nvidia") {
-    const nvidiaBody = {
-      model: selectedModel,
-      messages: [
-        { role: "system", content: `${instructions}\nDo not output <think> tags, internal reasoning, or hidden scratchpad text. Return final answer only.` },
-        ...history.map((m) => ({ role: m.role, content: toText(m.content) })),
-        { role: "user", content: inputText }
-      ],
-      temperature: 0.2,
-      top_p: 0.9,
-      max_tokens: 2200
-    };
-    const r = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${apiKey.trim()}`
-      },
-      body: JSON.stringify(nvidiaBody)
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d?.error?.message || `NVIDIA request failed (${r.status})`);
-    const text = extractChatCompletionText(d);
-    if (!text) throw new Error("No response text was returned by NVIDIA.");
-    return { text, usedSearch: false };
-  }
-
-  const openAiBody = {
+  const result = await proxyChat({
+    provider,
     model: selectedModel,
     instructions,
-    input: [
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-      { role: "user", content: inputText }
-    ]
-  };
-  const r = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey.trim()}`
-    },
-    body: JSON.stringify(openAiBody)
+    inputText,
+    history: history.map((m) => ({ role: m.role, content: toText(m.content) })),
+    apiKeyOverride: apiKey || "",
   });
-  const d = await r.json();
-  if (!r.ok) throw new Error(d?.error?.message || `OpenAI request failed (${r.status})`);
-  const text = extractResponseText(d);
-  if (!text) throw new Error("No response text was returned by the model.");
-  return { text, usedSearch: didUseWebSearch(d) };
+  if (!result?.text) throw new Error("No response text was returned by the model.");
+  return { text: result.text, usedSearch: result.used_search || false };
 };
 
 export default function App() {
@@ -3471,9 +3410,64 @@ export default function App() {
     });
   }, [provider]);
 
+  // ------------------------------------------------------------------
+  // Live data: fetch aggregated summary from backend on mount.
+  // This replaces the hardcoded DATA constant with the actual live
+  // snapshot stored in Supabase after an Import Center upload.
+  // Falls back gracefully — if no snapshot exists or the backend is
+  // offline, the existing localStorage/IndexedDB/built-in data is kept.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    let cancelled = false;
+    const loadLiveSummary = async () => {
+      try {
+        const summary = await fetchCustomerSummary();
+        if (cancelled || !summary?.overview?.total_customers) return;
+        setAppData((current) => {
+          // Don't replace if the user already manually loaded a workbook this session
+          if (/Dataset override|Auto-loaded/.test(dataSource)) return current;
+          return summary;
+        });
+        setDataSource("Live database snapshot");
+        window.localStorage.setItem(DATA_CACHE_KEY, JSON.stringify(summary));
+      } catch {
+        // Backend offline or no snapshot yet — keep existing data source
+      }
+    };
+    loadLiveSummary();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Live data: lazily fetch full customer records for DuckDB queries
+  // after the summary has loaded. Only runs when live data is active
+  // and no full records are in memory yet.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (dataSource !== "Live database snapshot") return;
+    if (asArray(appData?.customer_records).length > 0) return;
+    let cancelled = false;
+    const loadLiveRecords = async () => {
+      try {
+        const payload = await fetchCustomerRecords();
+        if (cancelled || !payload?.records?.length) return;
+        setAppData((current) => ({ ...current, customer_records: payload.records }));
+        setDataSource("Live database snapshot (full)");
+        await saveFullDatasetToDb({ ...appData, customer_records: payload.records }).catch(() => false);
+      } catch {
+        // Non-fatal — charts still work, customer match falls back to top_20
+      }
+    };
+    loadLiveRecords();
+    return () => { cancelled = true; };
+  }, [appData, dataSource]);
+
   useEffect(() => {
     if (typeof window === "undefined" || !datasetBootReady) return;
     if (asArray(appData?.customer_records).length) return;
+    // Skip XLSX auto-load if live DB data is already loaded
+    if (dataSource === "Live database snapshot" || dataSource === "Live database snapshot (full)") return;
     let cancelled = false;
     const tryAutoLoadWorkbook = async () => {
       setDataLoading(true);
@@ -3499,7 +3493,7 @@ export default function App() {
     };
     tryAutoLoadWorkbook();
     return () => { cancelled = true; };
-  }, [appData, datasetBootReady]);
+  }, [appData, datasetBootReady, dataSource]);
 
   const loadWorkbookFromFile = async (file) => {
     if (!file) return;
@@ -4838,10 +4832,6 @@ export default function App() {
       return;
     }
     const customerPreviewMode = selectedOutcome.id === "customer_list" || queryRules.customerQuery || isDeterministicCustomerQuery(resolvedQuery, selectedOutcome.id === "customer_list");
-    if (!customerPreviewMode && !apiKey.trim()) {
-      setMsgs([...next, { role: "assistant", content: `Strategy analysis needs a valid ${PROVIDER_META[provider]?.keyLabel || "model"} API key. Customer Match preview still works without one.`, error: true }]);
-      return;
-    }
     setLoading(true);
 
     try {
@@ -5144,10 +5134,6 @@ export default function App() {
   };
 
   const regenerateSection = async (messageIndex, sectionKey) => {
-    if (!apiKey.trim()) {
-      setChatNotice(`Add ${PROVIDER_META[provider]?.keyLabel || "model"} API key before section regenerate.`);
-      return;
-    }
     if (!REGENERABLE_SECTIONS.includes(sectionKey) || regenKey || loading) return;
     const target = msgs[messageIndex];
     if (!target?.structured || !target?.context) return;
@@ -5274,7 +5260,7 @@ export default function App() {
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:"1px solid #c4daee",background:"#ffffff",flexShrink:0,position:"relative",zIndex:1}}>
-        {[{id:"dash",label:"Dashboard"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
+        {[{id:"dash",label:"Dashboard"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",borderBottom:`3px solid ${tab===t.id?rc:"transparent"}`,color:tab===t.id?rc:"#4d5b78",padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
             {t.label}
           </button>
@@ -5297,38 +5283,17 @@ export default function App() {
               {dataError && <span style={{fontSize:12,color:"#ff6666",fontWeight:700}}>{dataError}</span>}
             </div>
             <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>fileInputRef.current?.click()} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:12,color:"#2f4f70",padding:"8px 14px",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Montserrat', sans-serif",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
-                Upload CSV/XLSX
+              <button onClick={()=>setTab("imports")} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:12,color:"#2f4f70",padding:"8px 14px",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Montserrat', sans-serif",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
+                Open Import Ops
               </button>
-              <button onClick={resetToBuiltInData} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:12,color:"#3f5f80",padding:"8px 14px",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Montserrat', sans-serif",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
-                Reset Data
-              </button>
-              <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={onWorkbookSelected} style={{display:"none"}} />
             </div>
           </div>
           <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap",background:"linear-gradient(145deg, #f8fbff, #f0f7ff)",border:"1px solid #cfe0f1",padding:"12px 14px",borderRadius:16,boxShadow:"0 10px 26px rgba(7,64,105,0.05)"}}>
-            <span style={{fontSize:13,color:"#074069",fontWeight:800}}>New dataset available:</span>
-            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#284a6b"}}>
-              <input type="radio" checked={uploadMode==="override"} onChange={()=>setUploadMode("override")} />
-              Override current dataset (Recommended)
-            </label>
-            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:"#4f6f93"}}>
-              <input type="radio" checked={uploadMode==="compare"} onChange={()=>setUploadMode("compare")} />
-              Compare only (no override)
-            </label>
-            <span style={{fontSize:12,color:"#5c7897"}}>Override is recommended because dashboard and AI stay aligned to one source of truth.</span>
+            <span style={{fontSize:13,color:"#074069",fontWeight:800}}>Live dataset policy:</span>
+            <span style={{fontSize:12,color:"#284a6b"}}>Only one parsed customer dataset stays active at a time.</span>
+            <span style={{fontSize:12,color:"#4f6f93"}}>Use Import Ops to validate the next MilkMaster workbook, review warnings, and queue the replacement in the background.</span>
+            <span style={{fontSize:12,color:"#6a84a4"}}>This dashboard still reflects the workspace-loaded dataset until backend snapshot hydration is wired into the analytics layer.</span>
           </div>
-          {stagedData && compareSummary && (
-            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginBottom:16,background:"#fff8ec",border:"1px solid #ead4ab",borderRadius:16,padding:"12px 14px",boxShadow:"0 10px 24px rgba(139,104,20,0.06)"}}>
-              <strong style={{color:"#6d4f18",fontSize:13}}>Staged dataset: {stagedSource}</strong>
-              <span style={{fontSize:12,color:"#6d4f18"}}>Customers delta: {compareSummary.customers >= 0 ? "+" : ""}{compareSummary.customers}</span>
-              <span style={{fontSize:12,color:"#6d4f18"}}>Revenue delta: {compareSummary.revenue >= 0 ? "+" : ""}{inr(compareSummary.revenue)}</span>
-              <span style={{fontSize:12,color:"#6d4f18"}}>Active delta: {compareSummary.active >= 0 ? "+" : ""}{compareSummary.active}</span>
-              <button onClick={applyStagedDataset} style={{background:"#d2ab67",border:"none",borderRadius:10,padding:"7px 12px",fontSize:12,fontWeight:"bold",cursor:"pointer"}}>
-                Apply override now
-              </button>
-            </div>
-          )}
           {/* KPIs */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:12,marginBottom:16}}>
             {[
@@ -5455,6 +5420,13 @@ export default function App() {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* IMPORTS TAB */}
+      {tab==="imports" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <ImportCenter role={role} roleMeta={ROLES[role]} onBackToDashboard={() => setTab("dash")} />
         </div>
       )}
 

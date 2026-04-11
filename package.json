@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@duckdb/duckdb-wasm": "^1.33.1-dev20.0",
+    "@fontsource/geist-sans": "^5.2.5",
     "@langfuse/client": "^5.0.2",
     "@tanstack/react-table": "^8.21.3",
     "date-fns": "^4.1.0",

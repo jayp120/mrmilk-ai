@@ -1,7 +1,7 @@
 # ============================================================
-# Mr Milk AI OS — VPS Deploy Script (Windows Server)
+# Mr Milk AI OS - VPS Deploy Script (Windows Server)
 # Run this once on your VPS to set everything up.
-# After that, just run start-production.ps1 to start the app.
+# After that, run start-production.ps1 to start the app.
 # ============================================================
 
 $ErrorActionPreference = "Stop"
@@ -9,7 +9,7 @@ $ROOT = $PSScriptRoot
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Mr Milk AI OS — VPS Setup" -ForegroundColor Cyan
+Write-Host "  Mr Milk AI OS - VPS Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -22,16 +22,25 @@ $python = Get-Command python -ErrorAction SilentlyContinue
 $node = Get-Command node -ErrorAction SilentlyContinue
 $npm = Get-Command npm -ErrorAction SilentlyContinue
 
-if (-not $python) { Write-Host "ERROR: Python not found. Install Python 3.11+ from python.org" -ForegroundColor Red; exit 1 }
-if (-not $node)   { Write-Host "ERROR: Node.js not found. Install Node.js 18+ from nodejs.org" -ForegroundColor Red; exit 1 }
-if (-not $npm)    { Write-Host "ERROR: npm not found." -ForegroundColor Red; exit 1 }
+if (-not $python) {
+    Write-Host "ERROR: Python not found. Install Python 3.11+ from python.org" -ForegroundColor Red
+    exit 1
+}
+if (-not $node) {
+    Write-Host "ERROR: Node.js not found. Install Node.js 18+ from nodejs.org" -ForegroundColor Red
+    exit 1
+}
+if (-not $npm) {
+    Write-Host "ERROR: npm not found." -ForegroundColor Red
+    exit 1
+}
 
 Write-Host "  Python: $(python --version)" -ForegroundColor Green
 Write-Host "  Node:   $(node --version)" -ForegroundColor Green
 Write-Host "  npm:    $(npm --version)" -ForegroundColor Green
 
 # ------------------------------------------
-# Step 2: Backend — Python venv + deps
+# Step 2: Backend - Python venv + deps
 # ------------------------------------------
 Write-Host ""
 Write-Host "[2/5] Setting up Python backend..." -ForegroundColor Yellow
@@ -46,7 +55,7 @@ if (-not (Test-Path $venvPath)) {
 Write-Host "  Backend dependencies installed" -ForegroundColor Green
 
 # ------------------------------------------
-# Step 3: Frontend — npm install + build
+# Step 3: Frontend - npm install + build
 # ------------------------------------------
 Write-Host ""
 Write-Host "[3/5] Building frontend for production..." -ForegroundColor Yellow
@@ -67,12 +76,12 @@ Write-Host "[4/5] Checking backend/.env..." -ForegroundColor Yellow
 $envPath = Join-Path $ROOT "backend\.env"
 if (-not (Test-Path $envPath)) {
     Copy-Item "$ROOT\backend\.env.example" $envPath
-    Write-Host "  Created backend/.env from example — EDIT IT with your real keys!" -ForegroundColor Red
+    Write-Host "  Created backend/.env from example - edit it with your real keys." -ForegroundColor Red
     Write-Host "  Open: $envPath" -ForegroundColor Red
     exit 1
-} else {
-    Write-Host "  backend/.env exists" -ForegroundColor Green
 }
+
+Write-Host "  backend/.env exists" -ForegroundColor Green
 
 # ------------------------------------------
 # Step 5: Done

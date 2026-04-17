@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import './fonts.css';
 import './globals.css';
 
@@ -11,6 +11,9 @@ export const metadata: Metadata = {
     description: 'From open thread to resolved system.',
     type: 'website',
   },
+};
+
+export const viewport: Viewport = {
   themeColor: '#05040A',
 };
 

@@ -1,0 +1,46 @@
+.root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.word {
+  position: absolute;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+  font-size: clamp(28px, 3.2vw, 42px);
+  letter-spacing: -0.01em;
+  color: rgba(244, 236, 225, 0.9);
+  opacity: 0;
+  transform: translateY(6px);
+  transition:
+    opacity 380ms var(--ease-soft),
+    transform 380ms var(--ease-soft);
+}
+
+.wordActive {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity 380ms var(--ease-soft),
+    transform 380ms var(--ease-soft);
+}
+
+.bandTop {
+  top: 14%;
+  left: 12%;
+}
+
+.bandMid {
+  top: 48%;
+  left: 8%;
+}
+
+.bandBot {
+  bottom: 18%;
+  left: 14%;
+}

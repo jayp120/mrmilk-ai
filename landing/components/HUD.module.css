@@ -1,0 +1,80 @@
+.root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  color: rgba(244, 236, 225, 0.55);
+}
+
+.cell {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tr {
+  top: 24px;
+  right: 32px;
+}
+
+.br {
+  bottom: 28px;
+  right: 32px;
+}
+
+.bl {
+  bottom: 28px;
+  left: 32px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 220px;
+}
+
+.rule {
+  width: 48px;
+  height: 1px;
+  background: rgba(244, 236, 225, 0.32);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--champagne);
+  box-shadow: 0 0 8px rgba(201, 177, 133, 0.55);
+  animation: pulse 3.2s var(--ease-soft) infinite;
+}
+
+.state {
+  color: var(--ivory);
+  opacity: 0.78;
+  transition: opacity 400ms var(--ease-soft);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+@media (max-width: 720px) {
+  .tr,
+  .br,
+  .bl {
+    font-size: 10px;
+  }
+  .bl {
+    min-width: 0;
+  }
+}

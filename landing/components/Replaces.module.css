@@ -1,0 +1,58 @@
+.root {
+  composes: section from './Section.module.css';
+  border-top: 1px solid rgba(244, 236, 225, 0.06);
+}
+
+.title {
+  grid-column: 3 / span 8;
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  margin-bottom: 56px;
+  text-wrap: balance;
+}
+
+.title em {
+  font-style: italic;
+  color: rgba(244, 236, 225, 0.8);
+}
+
+.prose {
+  grid-column: 3 / span 7;
+  font-size: var(--fs-body-l);
+  line-height: 1.7;
+  color: rgba(244, 236, 225, 0.8);
+  max-width: 54ch;
+}
+
+.prose p + p {
+  margin-top: 1.2em;
+}
+
+.quote {
+  grid-column: 2 / span 10;
+  margin: 80px 0 72px;
+  text-align: center;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: clamp(26px, 3vw, 42px);
+  line-height: 1.2;
+  color: var(--ivory);
+  letter-spacing: -0.012em;
+  max-width: 30ch;
+  margin-left: auto;
+  margin-right: auto;
+  text-wrap: balance;
+}
+
+@media (max-width: 820px) {
+  .title,
+  .prose {
+    grid-column: 1 / -1;
+  }
+  .quote {
+    grid-column: 1 / -1;
+    margin: 48px 0;
+  }
+}

@@ -10,7 +10,8 @@ import { CanvasRenderer } from "echarts/renderers";
 import { captureChatAudit } from "./mrmilk-chat-audit.js";
 import ContentStudio from "./src/ContentStudio.jsx";
 import ImportCenter from "./src/ImportCenter.jsx";
-import { fetchCustomerRecords, fetchCustomerSummary, proxyChat } from "./src/utils/importApi.js";
+import { fetchChatNotebook, fetchCustomerRecords, fetchCustomerSummary, fetchImportHistory, proxyChat, streamChatNotebook } from "./src/utils/importApi.js";
+import NotebookAnswer from "./src/chat/NotebookAnswer.jsx";
 
 echarts.use([BarChart, LineChart, PieChart, ScatterChart, TreemapChart, GraphicComponent, GridComponent, LegendComponent, TooltipComponent, VisualMapComponent, CanvasRenderer]);
 
@@ -287,7 +288,7 @@ const DEFAULT_CHAT_CONTROLS = {
 };
 const FREE_PROVIDER_OPTIONS = ["nvidia", "gemini"];
 const PROVIDER_META = {
-  gemini: { label: "Gemini API", keyLabel: "Gemini", defaultModel: "gemini-2.5-flash" },
+  gemini: { label: "Gemini API", keyLabel: "Gemini", defaultModel: "gemini-2.5-pro" },
   openai: { label: "OpenAI API", keyLabel: "OpenAI", defaultModel: "gpt-4.1-mini" },
   nvidia: { label: "NVIDIA NIM", keyLabel: "NVIDIA", defaultModel: "qwen/qwen2-7b-instruct" }
 };
@@ -552,11 +553,14 @@ function hasAmbiguousTimeframe(query = "") {
 }
 
 function extractRequestedCustomerCount(query, fallback = 8) {
-  const direct = toText(query).match(/\b(\d{1,2})\s+(customers|customer|accounts|people|rows|list)\b/i);
+  const text = toText(query);
+  const direct =
+    text.match(/\b(?:top|best|highest|lowest|first)\s+(\d{1,5})\b/i)
+    || text.match(/\b(\d{1,5})\s+(customers|customer|accounts|people|rows|records|list)\b/i);
   if (!direct?.[1]) return fallback;
   const count = Number(direct[1]);
   if (!Number.isFinite(count)) return fallback;
-  return Math.max(3, Math.min(20, count));
+  return Math.max(1, Math.min(5000, count));
 }
 
 function isCustomerListIntent(query = "") {
@@ -584,15 +588,18 @@ function isDeterministicCustomerQuery(query = "", simpleMode = false) {
 }
 
 function matchesCustomerStatus(record, statusType = "") {
-  const status = toKey(record?.status);
+  const status = toText(record?.status || record?.["Sub. Status"]);
   if (!statusType) return true;
-  if (statusType === "suspended") return /suspend/.test(status);
-  if (statusType === "inactive") return /inactive/.test(status);
-  if (statusType === "trial") return /trial|new customer/.test(status);
-  if (statusType === "active") return /active/.test(status) && !/inactive/.test(status);
-  if (statusType === "blocked") return /blocked/.test(status);
-  if (statusType === "dnd") return /\bdnd\b/.test(status);
-  return status.includes(toKey(statusType));
+  if (statusType === "suspended") return isPrefixedMilkMasterStatus(status, "Suspended");
+  if (statusType === "inactive") return isPrefixedMilkMasterStatus(status, "Inactive");
+  if (statusType === "trial") return isPrefixedMilkMasterStatus(status, "Trial");
+  if (statusType === "active") return isExactMilkMasterStatus(status, "Active Subscription");
+  if (statusType === "active_no_subscription") return isExactMilkMasterStatus(status, "Active No Subscription");
+  if (statusType === "new") return isExactMilkMasterStatus(status, "New Customer");
+  if (statusType === "on_vacation") return isExactMilkMasterStatus(status, "On Vacation");
+  if (statusType === "blocked") return /blocked/.test(toKey(status));
+  if (statusType === "dnd") return /\bdnd\b/.test(toKey(status));
+  return toKey(status).includes(toKey(statusType));
 }
 
 function sortCustomerRecords(records = [], sortMode = "revenue_desc") {
@@ -1902,6 +1909,12 @@ const parseISODate = (iso) => new Date(`${iso}T00:00:00`);
 const daysBetween = (fromIso, toIso) => Math.floor((parseISODate(toIso) - parseISODate(fromIso)) / DAY_MS);
 const formatDateShort = (iso) => parseISODate(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
 const formatDateLongIso = (iso) => parseISODate(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
+const formatSnapshotDate = (isoTimestamp) => {
+  if (!isoTimestamp) return "";
+  const d = new Date(isoTimestamp);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+};
 const formatMonthYear = (year, monthIndex) => new Date(year, monthIndex, 1).toLocaleDateString("en-IN", { month: "long", year: "numeric" });
 const weekdayLabels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const confidenceStyles = {
@@ -2215,7 +2228,7 @@ const composeLayeredInstructions = ({ data, role, query, events, todayIso }) => 
 
 const inr = (n) => n >= 1e7 ? `Rs ${(n/1e7).toFixed(2)} Cr` : n >= 1e5 ? `Rs ${(n/1e5).toFixed(1)} L` : n >= 1000 ? `Rs ${(n/1000).toFixed(1)} K` : `Rs ${n}`;
 const stripDatasetForCache = (data) => {
-  const next = { ...asObject(data) };
+  const next = { ...normalizeDatasetStatusOverview(data) };
   delete next.customer_records;
   return next;
 };
@@ -2251,6 +2264,14 @@ const DATA_CACHE_KEY = "mrmilk_dataset_cache_v1";
 const LLM_PROVIDER_KEY = "mrmilk_llm_provider";
 const LLM_KEY_STORE = "mrmilk_llm_key";
 const LLM_MODEL_STORE = "mrmilk_llm_model";
+const IS_PRODUCTION_BUILD = import.meta.env.PROD;
+const DEMO_DATA_SOURCE = "Built-in sample data";
+const LOCAL_CACHE_DATA_SOURCE = "Cached browser snapshot";
+const FULL_CACHE_DATA_SOURCE = "IndexedDB full dataset cache";
+const PRODUCTION_PENDING_DATA_SOURCE = "Waiting for live database snapshot";
+const PRODUCTION_NO_SNAPSHOT_DATA_SOURCE = "No live database snapshot";
+const LIVE_DATA_SOURCE = "Live database snapshot";
+const LIVE_FULL_DATA_SOURCE = "Live database snapshot (full)";
 const AUTO_EXCEL_PATHS = [
   "./milkmaster1march.xlsx",
   "./milkmaster1march.csv",
@@ -2716,6 +2737,64 @@ const bump = (bucket, key, amount = 1) => { bucket[key] = (bucket[key] || 0) + a
 const sortDesc = (entries) => entries.sort((a, b) => b[1] - a[1]);
 const toObject = (entries) => Object.fromEntries(entries);
 const fmtDateLong = (dateValue) => new Date(dateValue).toLocaleDateString("en-IN", { month: "long", day: "numeric", year: "numeric" });
+const isExactMilkMasterStatus = (statusValue, expected) => toKey(statusValue) === toKey(expected);
+const isPrefixedMilkMasterStatus = (statusValue, prefix) => toKey(statusValue).startsWith(toKey(prefix));
+const buildSubscriptionStatusFromCustomerRecords = (records = []) => {
+  const bucket = {};
+  asArray(records).forEach((record) => {
+    const status = toText(record?.status || record?.["Sub. Status"]);
+    if (status) bump(bucket, status);
+  });
+  return bucket;
+};
+const summarizeMilkMasterStatuses = (statusMap = {}) => {
+  const next = asObject(statusMap);
+  let inactiveCustomers = 0;
+  let suspendedCustomers = 0;
+  let trialCustomers = 0;
+
+  Object.entries(next).forEach(([status, count]) => {
+    const value = toInt(count);
+    if (isPrefixedMilkMasterStatus(status, "Inactive")) inactiveCustomers += value;
+    if (isPrefixedMilkMasterStatus(status, "Suspended")) suspendedCustomers += value;
+    if (isPrefixedMilkMasterStatus(status, "Trial")) trialCustomers += value;
+  });
+
+  return {
+    active_customers: toInt(next["Active Subscription"]),
+    active_no_subscription_customers: toInt(next["Active No Subscription"]),
+    inactive_customers: inactiveCustomers,
+    suspended_customers: suspendedCustomers,
+    trial_customers: trialCustomers,
+    new_customers: toInt(next["New Customer"]),
+    on_vacation_customers: toInt(next["On Vacation"]),
+  };
+};
+const normalizeDatasetStatusOverview = (data = {}) => {
+  const next = { ...asObject(data) };
+  const overview = { ...asObject(data?.overview) };
+  let subscriptionStatus = asObject(data?.subscription_status);
+
+  if (!Object.keys(subscriptionStatus).length && asArray(data?.customer_records).length) {
+    subscriptionStatus = buildSubscriptionStatusFromCustomerRecords(data.customer_records);
+  }
+
+  if (!Object.keys(subscriptionStatus).length) {
+    next.overview = overview;
+    return next;
+  }
+
+  const totalFromStatuses = Object.values(subscriptionStatus).reduce((sum, value) => sum + toInt(value), 0);
+  const totalFromRecords = asArray(data?.customer_records).length;
+
+  next.subscription_status = toObject(sortDesc(Object.entries(subscriptionStatus)));
+  next.overview = {
+    ...overview,
+    total_customers: Math.max(totalFromStatuses, toInt(overview.total_customers), totalFromRecords),
+    ...summarizeMilkMasterStatuses(subscriptionStatus),
+  };
+  return next;
+};
 
 const normalizeRow = (row) => {
   const normalized = {};
@@ -2804,10 +2883,12 @@ const buildEmptyDataset = (sourceDate, excludedCashPickupRows = 0) => ({
     avg_revenue_per_customer: 0,
     total_wallet_balance: 0,
     active_customers: 0,
+    active_no_subscription_customers: 0,
     inactive_customers: 0,
     suspended_customers: 0,
     trial_customers: 0,
     new_customers: 0,
+    on_vacation_customers: 0,
     dnd_customers: 0,
     blocked_customers: 0
   },
@@ -2840,10 +2921,17 @@ const loadCachedData = () => {
     const raw = window.localStorage.getItem(DATA_CACHE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    return parsed?.overview?.total_customers ? parsed : null;
+    const normalized = normalizeDatasetStatusOverview(parsed);
+    return normalized?.overview?.total_customers ? normalized : null;
   } catch {
     return null;
   }
+};
+const createInitialDatasetState = () => {
+  const cached = loadCachedData();
+  if (cached) return { data: cached, source: LOCAL_CACHE_DATA_SOURCE };
+  if (IS_PRODUCTION_BUILD) return { data: buildEmptyDataset(Date.now()), source: PRODUCTION_PENDING_DATA_SOURCE };
+  return { data: normalizeDatasetStatusOverview(DATA), source: DEMO_DATA_SOURCE };
 };
 const DATA_DB_NAME = "mrmilk_ai_storage";
 const DATA_DB_VERSION = 1;
@@ -2867,7 +2955,7 @@ const loadFullDatasetFromDb = async () => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(DATA_STORE_NAME, "readonly");
     const request = tx.objectStore(DATA_STORE_NAME).get(ACTIVE_DATASET_KEY);
-    request.onsuccess = () => resolve(request.result || null);
+    request.onsuccess = () => resolve(normalizeDatasetStatusOverview(request.result || null));
     request.onerror = () => reject(request.error || new Error("Could not load full dataset cache."));
     tx.oncomplete = () => db.close();
     tx.onerror = () => db.close();
@@ -2879,7 +2967,7 @@ const saveFullDatasetToDb = async (data) => {
   if (!db) return false;
   return new Promise((resolve, reject) => {
     const tx = db.transaction(DATA_STORE_NAME, "readwrite");
-    tx.objectStore(DATA_STORE_NAME).put(data, ACTIVE_DATASET_KEY);
+    tx.objectStore(DATA_STORE_NAME).put(normalizeDatasetStatusOverview(data), ACTIVE_DATASET_KEY);
     tx.oncomplete = () => { db.close(); resolve(true); };
     tx.onerror = () => { db.close(); reject(tx.error || new Error("Could not save full dataset cache.")); };
     tx.onabort = () => { db.close(); reject(tx.error || new Error("Full dataset cache write aborted.")); };
@@ -2921,7 +3009,7 @@ const parseCsvBuffer = async (arrayBuffer) => {
 };
 
 const deriveDataFromRows = (rows, sourceDate) => {
-  if (!Array.isArray(rows) || rows.length === 0) return DATA;
+  if (!Array.isArray(rows) || rows.length === 0) return buildEmptyDataset(sourceDate);
   const excludedCashPickupRows = rows.filter(isExcludedWorkbookRow).length;
   const usableRows = rows.filter((row) => !isExcludedWorkbookRow(row));
   if (!usableRows.length) return buildEmptyDataset(sourceDate, excludedCashPickupRows);
@@ -2941,10 +3029,12 @@ const deriveDataFromRows = (rows, sourceDate) => {
   let walletZero = 0;
   let walletNegative = 0;
   let activeCustomers = 0;
+  let activeNoSubscriptionCustomers = 0;
   let inactiveCustomers = 0;
   let suspendedCustomers = 0;
   let trialCustomers = 0;
   let newCustomers = 0;
+  let onVacationCustomers = 0;
   let dndCustomers = 0;
   let blockedCustomers = 0;
   let consumptionTotal = 0;
@@ -2966,11 +3056,13 @@ const deriveDataFromRows = (rows, sourceDate) => {
     const lastDeliveryIso = toISODate(row["Last Delivery Date"]);
 
     bump(subscriptionStatus, subStatus);
-    if (/^active/i.test(subStatus)) activeCustomers += 1;
-    else if (/^inactive/i.test(subStatus)) inactiveCustomers += 1;
-    else if (/^suspended/i.test(subStatus)) suspendedCustomers += 1;
-    else if (/^trial/i.test(subStatus)) trialCustomers += 1;
-    else if (/^new customer/i.test(subStatus)) newCustomers += 1;
+    if (isExactMilkMasterStatus(subStatus, "Active Subscription")) activeCustomers += 1;
+    else if (isExactMilkMasterStatus(subStatus, "Active No Subscription")) activeNoSubscriptionCustomers += 1;
+    else if (isPrefixedMilkMasterStatus(subStatus, "Inactive")) inactiveCustomers += 1;
+    else if (isPrefixedMilkMasterStatus(subStatus, "Suspended")) suspendedCustomers += 1;
+    else if (isPrefixedMilkMasterStatus(subStatus, "Trial")) trialCustomers += 1;
+    else if (isExactMilkMasterStatus(subStatus, "New Customer")) newCustomers += 1;
+    else if (isExactMilkMasterStatus(subStatus, "On Vacation")) onVacationCustomers += 1;
 
     if (/^yes$/i.test(toText(row.DND))) dndCustomers += 1;
     if (/^blocked$/i.test(toText(row["Is Blocked"]))) blockedCustomers += 1;
@@ -3048,7 +3140,7 @@ const deriveDataFromRows = (rows, sourceDate) => {
   const avgWalletBalance = totalCustomers ? totalWallet / totalCustomers : 0;
   const avgDailyLiters = consumptionCount ? consumptionTotal / consumptionCount : 0;
 
-  return {
+  return normalizeDatasetStatusOverview({
     data_date: dataDate,
     overview: {
       total_customers: totalCustomers,
@@ -3057,10 +3149,12 @@ const deriveDataFromRows = (rows, sourceDate) => {
       avg_revenue_per_customer: Number(avgRevenuePerCustomer.toFixed(2)),
       total_wallet_balance: totalWallet,
       active_customers: activeCustomers,
+      active_no_subscription_customers: activeNoSubscriptionCustomers,
       inactive_customers: inactiveCustomers,
       suspended_customers: suspendedCustomers,
       trial_customers: trialCustomers,
       new_customers: newCustomers,
+      on_vacation_customers: onVacationCustomers,
       dnd_customers: dndCustomers,
       blocked_customers: blockedCustomers
     },
@@ -3100,7 +3194,7 @@ const deriveDataFromRows = (rows, sourceDate) => {
     })),
     top_20_customers: customerRows.sort((a, b) => b["Total Revenue"] - a["Total Revenue"]).slice(0, 20),
     high_value_inactive: inactiveRows.sort((a, b) => b["Total Revenue"] - a["Total Revenue"]).slice(0, 5)
-  };
+  });
 };
 
 const parseDatasetBuffer = async (arrayBuffer, sourceDate, fileName = "") => {
@@ -3244,6 +3338,8 @@ const requestModelText = async ({ provider, model, apiKey, instructions, inputTe
 };
 
 export default function App() {
+  const initialDatasetRef = useRef(null);
+  if (!initialDatasetRef.current) initialDatasetRef.current = createInitialDatasetState();
   const [tab, setTab] = useState("dash");
   const [role, setRole] = useState("owner");
   const [msgs, setMsgs] = useState([]);
@@ -3253,11 +3349,21 @@ export default function App() {
   const [pendingClarification, setPendingClarification] = useState(null);
   const [regenKey, setRegenKey] = useState("");
   const [chatNotice, setChatNotice] = useState("");
-  const [appData, setAppData] = useState(() => loadCachedData() || DATA);
-  const [dataSource, setDataSource] = useState(() => (loadCachedData() ? "Cached Excel snapshot" : "Built-in sample data"));
+  const [appData, setAppData] = useState(() => initialDatasetRef.current.data);
+  const [dataSource, setDataSource] = useState(() => initialDatasetRef.current.source);
   const [dataLoading, setDataLoading] = useState(false);
   const [dataError, setDataError] = useState("");
   const [datasetBootReady, setDatasetBootReady] = useState(false);
+  // Live backend snapshot state:
+  //   loading      — initial fetch in flight
+  //   live         — backend returned a current snapshot and it's in appData
+  //   no-snapshot  — backend is up but no dataset has been imported yet
+  //   offline      — backend unreachable or errored
+  //   sample       — showing built-in demo/cached data (no live fetch attempted yet)
+  const [liveStatus, setLiveStatus] = useState("loading");
+  const [liveError, setLiveError] = useState("");
+  const [liveSnapshotMeta, setLiveSnapshotMeta] = useState(null);
+  const [liveReloadKey, setLiveReloadKey] = useState(0);
   const [uploadMode, setUploadMode] = useState("override");
   const [stagedData, setStagedData] = useState(null);
   const [stagedSource, setStagedSource] = useState("");
@@ -3325,6 +3431,13 @@ export default function App() {
   const chatInputRef = useRef(null);
   const fileInputRef = useRef(null);
   const proofActionRef = useRef(false);
+  const liveDataAppliedRef = useRef(false);
+  // Notebook mode: when true, chat messages route through /api/chat/notebook
+  // (Gemini tool-use over live Supabase) and are rendered as .deepnote-style
+  // block answers. When false, the legacy prompt-embedded-data chat path runs.
+  // Default on — this is the production accuracy upgrade; flip off via the
+  // "Notebook mode" toggle in the composer to fall back to legacy behavior.
+  const [notebookMode, setNotebookMode] = useState(true);
   const [autoPinChat, setAutoPinChat] = useState(true);
   const deferredInput = useDeferredValue(inp);
   const rc = ROLES[role].color;
@@ -3380,11 +3493,18 @@ export default function App() {
       try {
         const fullDataset = await loadFullDatasetFromDb();
         if (cancelled || !fullDataset?.overview?.total_customers || !asArray(fullDataset?.customer_records).length) return;
+        // Never overwrite live backend data with older IDB cache — live is source of truth.
+        if (liveDataAppliedRef.current) return;
         setAppData((current) => {
+          if (liveDataAppliedRef.current) return current;
           const currentFullRows = asArray(current?.customer_records).length;
           return currentFullRows >= asArray(fullDataset.customer_records).length ? current : fullDataset;
         });
-        setDataSource((current) => (/Built-in sample data|Cached Excel snapshot/.test(current) ? "IndexedDB full dataset cache" : current));
+        setDataSource((current) => {
+          if (/^Live database snapshot/.test(current)) return current;
+          if (liveDataAppliedRef.current) return current;
+          return /Built-in sample data|Cached Excel snapshot|Cached browser snapshot|Waiting for live database snapshot/.test(current) ? FULL_CACHE_DATA_SOURCE : current;
+        });
       } catch {
         // ignore IndexedDB cache issues
       } finally {
@@ -3397,7 +3517,7 @@ export default function App() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (!asArray(appData?.customer_records).length) return;
-    if (dataSource === "IndexedDB full dataset cache") return;
+    if (dataSource === FULL_CACHE_DATA_SOURCE) return;
     saveFullDatasetToDb(appData).catch(() => false);
   }, [appData, dataSource]);
   useEffect(() => {
@@ -3411,63 +3531,154 @@ export default function App() {
   }, [provider]);
 
   // ------------------------------------------------------------------
-  // Live data: fetch aggregated summary from backend on mount.
-  // This replaces the hardcoded DATA constant with the actual live
-  // snapshot stored in Supabase after an Import Center upload.
-  // Falls back gracefully — if no snapshot exists or the backend is
-  // offline, the existing localStorage/IndexedDB/built-in data is kept.
+  // Live data loader — two-phase for perceived performance.
+  //
+  // Phase 1 (fast, ~300-800ms): summary + history in parallel. Dashboard
+  // KPIs, charts, and status breakdown render right away.
+  //
+  // Phase 2 (deferred, 1-3s): the full 20k+ row customer_records payload
+  // loads in the background once the first paint has committed. Drill-
+  // downs are limited until this lands — better than hanging the whole
+  // dashboard behind a ~8 MB fetch.
+  //
+  // Both phases auto-retry ONCE on transient network / 5xx failures so
+  // backend-restart windows don't surface as "unreachable" banners.
+  //
+  // liveStatus transitions:
+  //   loading     — summary fetch in flight
+  //   live        — summary rendered; records may still be loading
+  //   no-snapshot — backend reachable but no dataset imported
+  //   offline     — backend unreachable or errored
   // ------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
-    const loadLiveSummary = async () => {
+
+    const retryOnTransient = async (label, fn) => {
       try {
-        const summary = await fetchCustomerSummary();
-        if (cancelled || !summary?.overview?.total_customers) return;
-        setAppData((current) => {
-          // Don't replace if the user already manually loaded a workbook this session
-          if (/Dataset override|Auto-loaded/.test(dataSource)) return current;
-          return summary;
-        });
-        setDataSource("Live database snapshot");
-        window.localStorage.setItem(DATA_CACHE_KEY, JSON.stringify(summary));
-      } catch {
-        // Backend offline or no snapshot yet — keep existing data source
+        return await fn();
+      } catch (err) {
+        const transient = !err?.status || err.status === 502 || err.status === 503 || err.status === 504;
+        if (!transient) throw err;
+        await new Promise((r) => setTimeout(r, 1200));
+        if (cancelled) throw err;
+        try {
+          return await fn();
+        } catch (second) {
+          console.warn(`[live] ${label} retry failed`, second?.message);
+          throw second;
+        }
       }
     };
-    loadLiveSummary();
+
+    const loadPhaseOne = async () => {
+      setLiveStatus("loading");
+      setLiveError("");
+      try {
+        const [summaryRes, historyRes] = await Promise.allSettled([
+          retryOnTransient("summary", fetchCustomerSummary),
+          retryOnTransient("history", fetchImportHistory),
+        ]);
+
+        if (cancelled) return null;
+
+        const summary = summaryRes.status === "fulfilled" ? summaryRes.value : null;
+        const summaryErr = summaryRes.status === "rejected" ? summaryRes.reason : null;
+
+        if (summary && summary.overview && toInt(summary.overview.total_customers) > 0) {
+          liveDataAppliedRef.current = true;
+          setAppData((current) => {
+            const preservedRecords = asArray(current?.customer_records);
+            return normalizeDatasetStatusOverview({ ...summary, customer_records: preservedRecords });
+          });
+          setDataSource(LIVE_DATA_SOURCE);
+          setLiveStatus("live");
+
+          const currentJob = historyRes.status === "fulfilled"
+            ? (asArray(historyRes.value?.items).find((item) => item?.is_current_dataset) || null)
+            : null;
+          setLiveSnapshotMeta(currentJob ? {
+            file_name: currentJob.file_name || "",
+            row_count: toInt(currentJob.row_count || summary.overview.total_customers),
+            imported_at: currentJob.updated_at || currentJob.created_at || "",
+            snapshot_id: summary.snapshot_id || "",
+          } : {
+            file_name: "",
+            row_count: toInt(summary.overview.total_customers),
+            imported_at: "",
+            snapshot_id: summary.snapshot_id || "",
+          });
+
+          try {
+            window.localStorage.setItem(DATA_CACHE_KEY, JSON.stringify(stripDatasetForCache(summary)));
+          } catch {}
+          return summary;
+        }
+
+        const status = summaryErr?.status;
+        if (status === 404) {
+          setLiveStatus("no-snapshot");
+          setLiveSnapshotMeta(null);
+          if (IS_PRODUCTION_BUILD) {
+            setAppData(buildEmptyDataset(Date.now()));
+            setDataSource(PRODUCTION_NO_SNAPSHOT_DATA_SOURCE);
+          }
+        } else if (status === 503 && /database/i.test(summaryErr?.message || "")) {
+          setLiveStatus("db-unavailable");
+          setLiveError(summaryErr?.message || "Database is not reachable.");
+          setLiveSnapshotMeta(null);
+        } else {
+          setLiveStatus("offline");
+          setLiveError(summaryErr?.message || "Could not reach backend.");
+          setLiveSnapshotMeta(null);
+        }
+        return null;
+      } catch (err) {
+        if (!cancelled) {
+          setLiveStatus("offline");
+          setLiveError(err?.message || "Unknown error fetching live data.");
+          setLiveSnapshotMeta(null);
+        }
+        return null;
+      }
+    };
+
+    const loadPhaseTwo = async (summary) => {
+      if (cancelled || !summary) return;
+      try {
+        const payload = await retryOnTransient("records", fetchCustomerRecords);
+        if (cancelled) return;
+        const records = asArray(payload?.records);
+        if (!records.length) return;
+        setAppData((current) => normalizeDatasetStatusOverview({ ...current, customer_records: records }));
+        setDataSource(LIVE_FULL_DATA_SOURCE);
+        try {
+          await saveFullDatasetToDb({ ...summary, customer_records: records }).catch(() => false);
+        } catch {}
+      } catch (err) {
+        console.warn("[live] records fetch failed:", err?.message);
+      }
+    };
+
+    (async () => {
+      const summary = await loadPhaseOne();
+      // Yield a paint tick so React commits the summary render before the
+      // ~8 MB records fetch starts competing for the main thread.
+      await new Promise((r) => setTimeout(r, 0));
+      if (!cancelled) await loadPhaseTwo(summary);
+    })();
+
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [liveReloadKey]);
 
-  // ------------------------------------------------------------------
-  // Live data: lazily fetch full customer records for DuckDB queries
-  // after the summary has loaded. Only runs when live data is active
-  // and no full records are in memory yet.
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    if (dataSource !== "Live database snapshot") return;
-    if (asArray(appData?.customer_records).length > 0) return;
-    let cancelled = false;
-    const loadLiveRecords = async () => {
-      try {
-        const payload = await fetchCustomerRecords();
-        if (cancelled || !payload?.records?.length) return;
-        setAppData((current) => ({ ...current, customer_records: payload.records }));
-        setDataSource("Live database snapshot (full)");
-        await saveFullDatasetToDb({ ...appData, customer_records: payload.records }).catch(() => false);
-      } catch {
-        // Non-fatal — charts still work, customer match falls back to top_20
-      }
-    };
-    loadLiveRecords();
-    return () => { cancelled = true; };
-  }, [appData, dataSource]);
+  const refreshLiveData = () => setLiveReloadKey((k) => k + 1);
 
   useEffect(() => {
     if (typeof window === "undefined" || !datasetBootReady) return;
+    if (IS_PRODUCTION_BUILD) return;
     if (asArray(appData?.customer_records).length) return;
     // Skip XLSX auto-load if live DB data is already loaded
-    if (dataSource === "Live database snapshot" || dataSource === "Live database snapshot (full)") return;
+    if (dataSource === LIVE_DATA_SOURCE || dataSource === LIVE_FULL_DATA_SOURCE) return;
     let cancelled = false;
     const tryAutoLoadWorkbook = async () => {
       setDataLoading(true);
@@ -3527,8 +3738,8 @@ export default function App() {
   };
 
   const resetToBuiltInData = () => {
-    setAppData(DATA);
-    setDataSource("Built-in sample data");
+    setAppData(IS_PRODUCTION_BUILD ? buildEmptyDataset(Date.now()) : normalizeDatasetStatusOverview(DATA));
+    setDataSource(IS_PRODUCTION_BUILD ? PRODUCTION_PENDING_DATA_SOURCE : DEMO_DATA_SOURCE);
     setStagedData(null);
     setStagedSource("");
     setDataError("");
@@ -3705,6 +3916,7 @@ export default function App() {
   };
 
   const D = appData.overview || DATA.overview;
+  const productionLiveDataUnavailable = IS_PRODUCTION_BUILD && liveStatus !== "live";
   const hasFullWorkbookRows = asArray(appData?.customer_records).length > 0;
   const inactivePct = D.total_customers ? ((D.inactive_customers / D.total_customers) * 100).toFixed(1) : "0.0";
   const trialEnded = appData.subscription_status?.["Trial Ended"] || 0;
@@ -3722,6 +3934,34 @@ export default function App() {
     if (otherTotal > 0) top.push({ name: "Others", v: otherTotal, c: STATUS_COLORS[7] });
     return top;
   }, [appData]);
+
+  // MilkMaster-parity status breakdown: every subscription_status bucket
+  // from the MilkMaster UI, rendered in the same order, with the same labels.
+  // The structure is fixed — only the counts change when a new snapshot is
+  // imported. Tiles with zero counts stay visible so the layout is stable
+  // across datasets. Each tile is click-to-proof.
+  const statusBreakdown = useMemo(() => {
+    const sm = appData.subscription_status || {};
+    const display = [
+      { key: "__total__",                  label: "Total Customers",         c: "#2f7a4f", total: true },
+      { key: "Active Subscription",        label: "Active",                  c: "#2fa65d" },
+      { key: "Inactive",                   label: "Inactive",                c: "#e04a3a" },
+      { key: "Suspended",                  label: "Suspended",               c: "#ff9944" },
+      { key: "Suspended Low Balance",      label: "Suspended - Low Balance", c: "#ff6633" },
+      { key: "Active No Subscription",     label: "Active - No Subscription",c: "#44bbff" },
+      { key: "Inactive No Subscription",   label: "Inactive - No Subscription", c: "#8a98a8" },
+      { key: "Inactive No Order",          label: "Inactive - No Order",     c: "#d96a6a" },
+      { key: "New Customer",               label: "New Customers",           c: "#44cc88" },
+      { key: "Trial Running",              label: "Trial Running",           c: "#4499ff" },
+      { key: "Trial Ended",                label: "Trial Ended",             c: "#ff9944" },
+      { key: "Trial Not Converted",        label: "Trial Not Converted",     c: "#ff5544" },
+      { key: "On Vacation",                label: "On Vacation",             c: "#5fb0d6" },
+    ];
+    return display.map((d) => ({
+      ...d,
+      v: d.total ? toInt(D.total_customers) : toInt(sm[d.key]),
+    }));
+  }, [D.total_customers, appData]);
 
   const hubData = useMemo(() => Object.entries(appData.hub_performance || {})
     .map(([name, d]) => ({ name: name.length > 12 ? name.slice(0, 12) : name, rev: Math.round(toNumber(d?.revenue) / 100000), cust: toInt(d?.customers), full: name }))
@@ -4023,7 +4263,27 @@ export default function App() {
     }]
   }), [srcData]);
 
-  const topSuspended = useMemo(() => (appData.top_20_customers || []).find(c => /suspend/i.test(toText(c["Sub. Status"]))) || (appData.top_20_customers || [])[0], [appData]);
+  const topSuspended = useMemo(() => {
+    const topTwenty = asArray(appData.top_20_customers);
+    const suspendedByRevenue = topTwenty.find((c) => /suspend/i.test(toText(c["Sub. Status"])));
+    if (suspendedByRevenue) return suspendedByRevenue;
+    const records = asArray(appData.customer_records);
+    if (!records.length) return null;
+    const recordMatches = records
+      .filter((r) => /suspend/i.test(toText(r.status || r["Sub. Status"])))
+      .sort((a, b) => toNumber(b.revenue ?? b["Total Revenue"]) - toNumber(a.revenue ?? a["Total Revenue"]));
+    const first = recordMatches[0];
+    if (!first) return null;
+    return {
+      Name: first.name || first.Name || "",
+      Mobile: first.mobile || first.Mobile || "",
+      Area: first.area || first.Area || "",
+      "Total Revenue": toNumber(first.revenue ?? first["Total Revenue"]),
+      "Total Orders": toInt(first.orders ?? first["Total Orders"]),
+      "Sub. Status": first.status || first["Sub. Status"] || "",
+      "Wallet Balance": toNumber(first.wallet_balance ?? first["Wallet Balance"]),
+    };
+  }, [appData]);
   const inactiveHighlights = useMemo(() => (appData.high_value_inactive || []).slice(0, 4), [appData]);
   const primaryOutcome = inferPrimaryOutcome(chatControls);
   const activeOutcome = getOutcomeMeta(primaryOutcome);
@@ -4465,8 +4725,8 @@ export default function App() {
       profileId = "wallet";
     } else if (metric === "trial") {
       predicate = (row) => matchesCustomerStatus(row, "trial");
-      title = "Trial and new-customer proof";
-      subtitle = "Customers in trial or new-customer states from the current workbook.";
+      title = "Trial customer proof";
+      subtitle = "Customers in trial-stage states from the current workbook.";
       filters = describeCustomerFilters({ statusType: "trial" });
       query = "trial customers";
       profileId = "trial";
@@ -4807,6 +5067,94 @@ export default function App() {
     const next = [...msgs, { role: "user", content: q }];
     setMsgs(next);
     setChatNotice("");
+
+    if (productionLiveDataUnavailable) {
+      const message = liveStatus === "loading"
+        ? "Live data is still loading. Wait for the database snapshot to finish loading, then ask again."
+        : liveStatus === "no-snapshot"
+          ? "Production chat is locked until a live MilkMaster snapshot is imported. Open Import Ops and queue the first workbook."
+          : liveStatus === "db-unavailable"
+            ? "Production chat is locked because the database is unavailable. Restore the Supabase/Postgres connection, then retry."
+            : "Production chat is locked because the backend is unavailable. Restore the API/database connection, then retry.";
+      setMsgs([...next, { role: "assistant", content: message, error: true }]);
+      return;
+    }
+
+    // --------------------------------------------------------------
+    // Notebook mode: stream live Deepnote-style execution events from the
+    // /api/chat/notebook/stream SSE endpoint. Each event progressively
+    // updates the placeholder assistant message so the user sees the
+    // tool log build step-by-step, then the final blocks replace it.
+    // --------------------------------------------------------------
+    if (notebookMode) {
+      setLoading(true);
+      const historyForAgent = msgs
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({
+          role: m.role,
+          content: m.blocks
+            ? (m.blocks.find((b) => b.type === "text")?.content || m.content || "")
+            : (m.content || ""),
+        }));
+
+      // Insert a placeholder assistant message we'll update as events arrive.
+      const placeholderIndex = next.length; // index in the new msgs array
+      setMsgs([
+        ...next,
+        { role: "assistant", content: "", blocks: [], notebookMeta: {}, events: [], streaming: true },
+      ]);
+
+      try {
+        await streamChatNotebook({
+          question: q,
+          history: historyForAgent,
+          onEvent: ({ event, data }) => {
+            setMsgs((prev) => {
+              const copy = prev.slice();
+              const msg = copy[placeholderIndex];
+              if (!msg) return prev;
+              if (event === "blocks" && data) {
+                copy[placeholderIndex] = {
+                  ...msg,
+                  blocks: asArray(data.blocks),
+                  notebookMeta: data.meta || {},
+                  streaming: false,
+                };
+              } else if (event === "done") {
+                copy[placeholderIndex] = { ...msg, streaming: false };
+              } else if (event === "error") {
+                copy[placeholderIndex] = {
+                  ...msg,
+                  streaming: false,
+                  events: [...asArray(msg.events), { event, data }],
+                  error: true,
+                  content: (data && data.message) || "Notebook chat failed.",
+                };
+              } else {
+                copy[placeholderIndex] = {
+                  ...msg,
+                  events: [...asArray(msg.events), { event, data }],
+                };
+              }
+              return copy;
+            });
+          },
+        });
+      } catch (err) {
+        const errMsg = err?.message || "Notebook chat failed.";
+        setMsgs((prev) => {
+          const copy = prev.slice();
+          const msg = copy[placeholderIndex];
+          if (msg) {
+            copy[placeholderIndex] = { ...msg, streaming: false, error: true, content: errMsg };
+          }
+          return copy;
+        });
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
 
     const knownAreas = Object.keys(appData?.top_areas_by_revenue || {});
     if (!pendingClarification && !isPreset && isVagueQuery(q, knownAreas)) {
@@ -5272,28 +5620,65 @@ export default function App() {
         <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:14,flexWrap:"wrap"}}>
             <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
-              <span style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#5f7898",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>Data Date: <strong style={{color:"#1f3550",fontWeight:700}}>{appData.data_date || "Unknown"}</strong></span>
-              <span style={{background:"#f4f9ff",border:"1px solid #d7e3f0",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#5e7ea1"}}>{dataSource}</span>
-              <span style={{background:"#edf5ff",border:"1px solid #c7d9ea",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#4f6f93"}}>
-                {hasFullWorkbookRows
-                  ? `${toInt(asArray(appData.customer_records).length).toLocaleString()} grounded customer rows live`
-                  : `${customerRecords.length.toLocaleString()} cached proof rows loaded | full workbook rows pending`}
-              </span>
-              {dataLoading && <span style={{fontSize:12,color:"#4499ff",fontWeight:700}}>Loading workbook...</span>}
+              {liveStatus === "live" ? (
+                <>
+                  <span style={{background:"#eaf7ef",border:"1px solid #bde0c7",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#2f7a4f",fontWeight:700,display:"inline-flex",alignItems:"center",gap:6}}>
+                    <span style={{width:8,height:8,borderRadius:"50%",background:"#2fa65d",display:"inline-block"}}/>
+                    Live database snapshot
+                  </span>
+                  {liveSnapshotMeta?.file_name && (
+                    <span style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#5f7898"}}>File: <strong style={{color:"#1f3550",fontWeight:700}}>{liveSnapshotMeta.file_name}</strong></span>
+                  )}
+                  {liveSnapshotMeta?.imported_at && (
+                    <span style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#5f7898"}}>Imported: <strong style={{color:"#1f3550",fontWeight:700}}>{formatSnapshotDate(liveSnapshotMeta.imported_at)}</strong></span>
+                  )}
+                  <span style={{background:"#edf5ff",border:"1px solid #c7d9ea",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#4f6f93"}}>
+                    {toInt(liveSnapshotMeta?.row_count || appData?.overview?.total_customers).toLocaleString()} rows
+                    {asArray(appData?.customer_records).length > 0 ? " | full detail loaded" : " | aggregate only"}
+                  </span>
+                </>
+              ) : liveStatus === "loading" ? (
+                <span style={{background:"#f4f9ff",border:"1px solid #d7e3f0",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#4499ff",fontWeight:700}}>Loading live snapshot from backend...</span>
+              ) : liveStatus === "no-snapshot" ? (
+                <span style={{background:"#fff5e6",border:"1px solid #ead4ab",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#97753a",fontWeight:700}}>{IS_PRODUCTION_BUILD ? "No live dataset imported" : "No dataset imported yet - showing sample data"}</span>
+              ) : liveStatus === "db-unavailable" ? (
+                <span style={{background:"#fdeaea",border:"1px solid #e4b5b5",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#b94a4a",fontWeight:700}}>Database unavailable - showing cached/sample data</span>
+              ) : (
+                <span style={{background:"#fdeaea",border:"1px solid #e4b5b5",borderRadius:999,padding:"7px 12px",fontSize:12,color:"#b94a4a",fontWeight:700}}>{IS_PRODUCTION_BUILD ? "Backend unavailable" : "Backend unreachable - showing cached/sample data"}</span>
+              )}
               {dataError && <span style={{fontSize:12,color:"#ff6666",fontWeight:700}}>{dataError}</span>}
             </div>
             <div style={{display:"flex",gap:8}}>
+              <button onClick={refreshLiveData} disabled={liveStatus === "loading"} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:12,color:liveStatus==="loading"?"#9ab2cf":"#2f4f70",padding:"8px 14px",cursor:liveStatus==="loading"?"not-allowed":"pointer",fontSize:12,fontWeight:700,fontFamily:"'Montserrat', sans-serif",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
+                {liveStatus === "loading" ? "Refreshing..." : "Refresh from DB"}
+              </button>
               <button onClick={()=>setTab("imports")} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:12,color:"#2f4f70",padding:"8px 14px",cursor:"pointer",fontSize:12,fontWeight:700,fontFamily:"'Montserrat', sans-serif",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
                 Open Import Ops
               </button>
             </div>
           </div>
-          <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap",background:"linear-gradient(145deg, #f8fbff, #f0f7ff)",border:"1px solid #cfe0f1",padding:"12px 14px",borderRadius:16,boxShadow:"0 10px 26px rgba(7,64,105,0.05)"}}>
-            <span style={{fontSize:13,color:"#074069",fontWeight:800}}>Live dataset policy:</span>
-            <span style={{fontSize:12,color:"#284a6b"}}>Only one parsed customer dataset stays active at a time.</span>
-            <span style={{fontSize:12,color:"#4f6f93"}}>Use Import Ops to validate the next MilkMaster workbook, review warnings, and queue the replacement in the background.</span>
-            <span style={{fontSize:12,color:"#6a84a4"}}>This dashboard still reflects the workspace-loaded dataset until backend snapshot hydration is wired into the analytics layer.</span>
-          </div>
+
+          {liveStatus === "no-snapshot" && (
+            <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap",background:"linear-gradient(145deg, #fffdf7, #fff3dc)",border:"1px solid #ead4ab",padding:"14px 16px",borderRadius:16,boxShadow:"0 10px 26px rgba(139,104,20,0.05)"}}>
+              <span style={{fontSize:13,color:"#8b6914",fontWeight:800}}>No dataset has been imported yet.</span>
+              <span style={{fontSize:12,color:"#6d4f18"}}>{IS_PRODUCTION_BUILD ? "Upload your MilkMaster workbook via Import Ops before the dashboard and AI can show business numbers." : "The tiles below are demo values. Upload your MilkMaster workbook via Import Ops to see your real business numbers."}</span>
+              <button onClick={()=>setTab("imports")} style={{marginLeft:"auto",background:"#8b6914",border:"1px solid #7a5b0f",borderRadius:10,color:"#fffdf7",padding:"7px 14px",cursor:"pointer",fontSize:12,fontWeight:700}}>Import a workbook</button>
+            </div>
+          )}
+          {(liveStatus === "offline" || liveStatus === "db-unavailable") && (
+            <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap",background:"linear-gradient(145deg, #fff7f7, #fdeaea)",border:"1px solid #e4b5b5",padding:"14px 16px",borderRadius:16,boxShadow:"0 10px 26px rgba(185,74,74,0.05)"}}>
+              <span style={{fontSize:13,color:"#b94a4a",fontWeight:800}}>{liveStatus === "db-unavailable" ? "Cannot reach the database." : "Cannot reach the backend."}</span>
+              <span style={{fontSize:12,color:"#8a3b3b"}}>{IS_PRODUCTION_BUILD ? `${liveError || "The API at /api/customers/summary did not respond."} ${toInt(appData?.overview?.total_customers) > 0 ? `Showing ${dataSource} until live data returns.` : "No dashboard data is shown until the live API is restored."}` : `${liveError || "The API at /api/customers/summary did not respond."} Showing cached data if available, otherwise sample data.`}</span>
+              <button onClick={refreshLiveData} style={{marginLeft:"auto",background:"#b94a4a",border:"1px solid #9a3e3e",borderRadius:10,color:"#fff",padding:"7px 14px",cursor:"pointer",fontSize:12,fontWeight:700}}>Retry</button>
+            </div>
+          )}
+          {liveStatus === "live" && (
+            <div style={{display:"flex",gap:10,alignItems:"center",marginBottom:14,flexWrap:"wrap",background:"linear-gradient(145deg, #f8fbff, #f0f7ff)",border:"1px solid #cfe0f1",padding:"12px 14px",borderRadius:16,boxShadow:"0 10px 26px rgba(7,64,105,0.05)"}}>
+              <span style={{fontSize:13,color:"#074069",fontWeight:800}}>Live dataset policy:</span>
+              <span style={{fontSize:12,color:"#284a6b"}}>All tiles, charts, and proof rows below are computed directly from the current Supabase snapshot.</span>
+              <span style={{fontSize:12,color:"#4f6f93"}}>Use Import Ops to validate and replace the active workbook. Use Refresh from DB after an import to re-pull the latest.</span>
+            </div>
+          )}
           {/* KPIs */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:12,marginBottom:16}}>
             {[
@@ -5329,17 +5714,52 @@ export default function App() {
                 <div style={{color:"#777",fontSize:13}}>No suspended customer found in current dataset.</div>
               )}
             </div>
-            <div style={{background:"linear-gradient(160deg, rgba(255,150,0,0.06), rgba(255,255,255,0.96))",border:"1px solid rgba(255,150,0,0.18)",borderRadius:16,padding:"14px 16px",boxShadow:"0 14px 28px rgba(139,104,20,0.06)"}}>
-              <div style={{color:"#ff9944",fontSize:14,fontWeight:800,marginBottom:8}}>Competitive threats now active</div>
-              <div style={{color:"#557394",fontSize:13,lineHeight:1.75}}><strong style={{color:"#1f3550"}}>Country Delight</strong> - Kharadi, Hinjewadi, Wakad<br/><strong style={{color:"#1f3550"}}>Akshayakalpa</strong> - Aundh, Koregaon Park<br/><strong style={{color:"#1f3550"}}>Katraj Dairy</strong> - Kothrud, Deccan<br/><strong style={{color:"#1f3550"}}>Amul Home</strong> - targeting low-wallet segment</div>
-            </div>
             <div style={{background:"linear-gradient(160deg, rgba(100,100,255,0.06), rgba(255,255,255,0.96))",border:"1px solid rgba(100,100,255,0.18)",borderRadius:16,padding:"14px 16px",boxShadow:"0 14px 28px rgba(76,94,164,0.06)"}}>
               <div style={{color:"#5f7f9f",fontSize:14,fontWeight:800,marginBottom:8}}>High-value inactive priority list</div>
               <div style={{color:"#557394",fontSize:13,lineHeight:1.75}}>
                 {inactiveHighlights.length ? inactiveHighlights.map((c, i) => (
-                  <div key={i}>{c.Name} - {inr(c["Total Revenue"])} - {c.Area}</div>
+                  <div key={i} onClick={() => openSingleCustomerProof(c)} style={{cursor:"pointer"}}>
+                    <strong style={{color:"#1f3550"}}>{c.Name}</strong> - {inr(c["Total Revenue"])} - {c.Area}
+                    <span style={{color:"#8598b3",fontSize:11,marginLeft:6}}>({c["Sub. Status"] || "Inactive"}{c["Last Delivery"] ? `, last ${c["Last Delivery"]}` : ""})</span>
+                  </div>
                 )) : "No inactive list available in current dataset"}
               </div>
+            </div>
+          </div>
+
+          {/* MilkMaster-parity subscription status breakdown */}
+          <div style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:16,padding:"18px",boxShadow:"0 16px 34px rgba(7,64,105,0.05)",marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+              <div>
+                <div style={{color:"#d2ab67",fontSize:15,fontWeight:800}}>Customer status breakdown</div>
+                <div style={{color:"#6f86aa",fontSize:12,marginTop:4,lineHeight:1.55}}>Mirrors your MilkMaster summary panel 1:1. The 13 buckets and their order are fixed; only the counts change when you import a new snapshot. Click any tile to open the proof customers behind it.</div>
+              </div>
+              <div style={{fontSize:11,color:"#6f86aa",background:"#f4f9ff",border:"1px solid #d7e3f0",borderRadius:999,padding:"5px 10px"}}>
+                {(() => {
+                  const statusOnly = statusBreakdown.filter((s) => !s.total).reduce((sum, s) => sum + s.v, 0);
+                  const totalCustomers = toInt(D.total_customers);
+                  return statusOnly === totalCustomers
+                    ? `Sum reconciles: ${totalCustomers.toLocaleString()} customers`
+                    : `Sum mismatch: ${statusOnly.toLocaleString()} vs ${totalCustomers.toLocaleString()} total`;
+                })()}
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:10}}>
+              {statusBreakdown.map((s) => {
+                const totalCustomers = toInt(D.total_customers);
+                const pct = totalCustomers ? (s.v / totalCustomers) * 100 : 0;
+                const handleClick = s.total
+                  ? () => openKpiProof("total", { anchorId: "kpi-total" })
+                  : () => openStatusProof(s.key);
+                return (
+                  <button key={s.key} onClick={handleClick} style={{textAlign:"left",background:"linear-gradient(160deg, #ffffff, #f8fbff)",border:`1px solid ${s.c}33`,borderLeft:`4px solid ${s.c}`,borderRadius:12,padding:"12px 14px",cursor:"pointer",position:"relative",boxShadow:"0 8px 18px rgba(7,64,105,0.04)"}}>
+                    <div style={{color:s.c,fontSize:20,fontWeight:800,lineHeight:1.1}}>{s.v.toLocaleString()}</div>
+                    <div style={{color:"#1f3550",fontSize:12,fontWeight:700,marginTop:3}}>{s.label}</div>
+                    <div style={{color:"#6f86aa",fontSize:11,marginTop:3}}>{s.total ? "100.0% base" : `${pct.toFixed(1)}% of base`}</div>
+                    <div style={{color:"#8598b3",fontSize:9,textTransform:"uppercase",letterSpacing:0.7,fontWeight:700,marginTop:6}}>Proof rows</div>
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -5426,7 +5846,16 @@ export default function App() {
       {/* IMPORTS TAB */}
       {tab==="imports" && (
         <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
-          <ImportCenter role={role} roleMeta={ROLES[role]} onBackToDashboard={() => setTab("dash")} />
+          <ImportCenter
+            role={role}
+            roleMeta={ROLES[role]}
+            onBackToDashboard={() => setTab("dash")}
+            onImportSucceeded={(item) => {
+              setChatNotice(`Imported "${item?.file_name || "new workbook"}". Refreshing dashboard...`);
+              refreshLiveData();
+              setTab("dash");
+            }}
+          />
         </div>
       )}
 
@@ -5741,6 +6170,8 @@ export default function App() {
                     <div style={{maxWidth:m.role==="user"?"min(860px, 88%)":"min(1120px, 100%)",overflowX:"auto",background:m.role==="user"?"#edf5ff":"rgba(255,255,255,0.88)",border:`1px solid ${m.role==="user"?"#b9cee5":"#d7e3f0"}`,borderRadius:m.role==="user"?"18px 6px 18px 18px":"6px 20px 20px 20px",padding:"12px 15px",fontSize:13,lineHeight:1.78,color:m.error?"#ff6666":"#2f4f70",boxShadow:m.role==="user"?"0 10px 18px rgba(7,64,105,0.04)":"0 18px 34px rgba(7,64,105,0.06)"}}>
                       {m.role==="user"
                         ? <span style={{color:"#20476d"}}>{m.content}</span>
+                        : (m.blocks !== undefined || m.events?.length)
+                        ? <NotebookAnswer blocks={m.blocks || []} meta={m.notebookMeta || {}} events={m.events || []} streaming={!!m.streaming} onSuggest={(s) => send(s)} />
                         : <>
                             {m.skill && <div style={{color:"#6d87a9",fontSize:10,marginBottom:6}}>Strategy lens: {MARKETING_SKILLS[m.skill]?.label || MARKETING_SKILLS.core.label}</div>}
                             {m.deterministic && <div style={{color:"#2f7a4a",fontSize:10,marginBottom:6}}>Verified workbook mode | No model-generated customer rows</div>}
@@ -5782,7 +6213,7 @@ export default function App() {
                                         openedFrom: "chat",
                                         sortMode: toText(m?.structured?.data_snapshot?.sort_mode) || "revenue_desc"
                                       })} style={{background:"#ffffff",border:"1px solid #c7d9ea",borderRadius:999,padding:"2px 8px",fontSize:10,color:"#365a7f",cursor:"pointer"}}>
-                                        View customer details
+                                        Open full list ({asArray(m.structured?.customer_data_list).length.toLocaleString()})
                                       </button>
                                     )}
                                   </div>
@@ -5843,14 +6274,14 @@ export default function App() {
                                   })} style={{background:"#f6faff",border:"1px solid #c1d4e8",borderRadius:6,color:"#3d5b7c",padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Montserrat', sans-serif"}}
                                     onMouseOver={e=>{e.currentTarget.style.color="#074069";e.currentTarget.style.borderColor="#07406935";}}
                                     onMouseOut={e=>{e.currentTarget.style.color="#3d5b7c";e.currentTarget.style.borderColor="#c1d4e8";}}>
-                                    View Customer Details
+                                    Open Full List ({asArray(m.structured?.customer_data_list).length.toLocaleString()})
                                   </button>
                                 )}
                                 {!!asArray(m.structured?.customer_data_list).length && (
                                   <button onClick={()=>exportProofCsv(asArray(m.structured.customer_data_list), `chat-${toText(m?.context?.query || "customer-result")}`)} style={{background:"#f6faff",border:"1px solid #c1d4e8",borderRadius:6,color:"#3d5b7c",padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Montserrat', sans-serif"}}
                                     onMouseOver={e=>{e.currentTarget.style.color="#074069";e.currentTarget.style.borderColor="#07406935";}}
                                     onMouseOut={e=>{e.currentTarget.style.color="#3d5b7c";e.currentTarget.style.borderColor="#c1d4e8";}}>
-                                    Export CSV
+                                    Export Full CSV ({asArray(m.structured?.customer_data_list).length.toLocaleString()})
                                   </button>
                                 )}
                                 <button onClick={() => focusChatComposer(toText(m?.context?.query || ""))} style={{background:"#f6faff",border:"1px solid #c1d4e8",borderRadius:6,color:"#3d5b7c",padding:"4px 12px",cursor:"pointer",fontSize:11,fontFamily:"'Montserrat', sans-serif"}}
@@ -5946,12 +6377,18 @@ export default function App() {
 
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap",marginTop:8}}>
                   <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+                    <label title="Live Supabase answers via Gemini tool-use. Structured notebook-style replies with SQL + tables + charts." style={{display:"inline-flex",alignItems:"center",gap:6,cursor:"pointer",background:notebookMode?"#eaf7ef":"#f4f9ff",border:`1px solid ${notebookMode?"#bde0c7":"#d7e3f0"}`,borderRadius:999,padding:"4px 10px",fontSize:10,color:notebookMode?"#2f7a4f":"#5f7f9f",fontWeight:700}}>
+                      <input type="checkbox" checked={notebookMode} onChange={(e)=>setNotebookMode(e.target.checked)} style={{accentColor:"#2fa65d"}} />
+                      Notebook mode {notebookMode ? "(live DB)" : "(off)"}
+                    </label>
                     <span style={{fontSize:10,color:"#6f86aa"}}>
-                      {!!toText(deferredInput) && liveCustomerPreview
-                        ? `Preview ready: ${toInt(liveCustomerPreview.totalMatches).toLocaleString()} matches in current workbook`
-                        : "Enter to send. Shift + Enter for line break."}
+                      {notebookMode
+                        ? "Answers come from live Supabase via Gemini tool-use. SQL + tables + charts inline."
+                        : (!!toText(deferredInput) && liveCustomerPreview
+                            ? `Preview ready: ${toInt(liveCustomerPreview.totalMatches).toLocaleString()} matches in current workbook`
+                            : "Enter to send. Shift + Enter for line break.")}
                     </span>
-                    {!(activeOutcome.id === "customer_list") && !apiKey.trim() && (
+                    {!notebookMode && !(activeOutcome.id === "customer_list") && !apiKey.trim() && (
                       <span style={{fontSize:10,color:"#8b6b3a"}}>Model key required for this mode.</span>
                     )}
                   </div>

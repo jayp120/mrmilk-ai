@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile, status
 
 from ...config import get_settings
@@ -5,6 +7,7 @@ from ...db import get_db_last_error, is_db_available, is_db_configured, session_
 from ...schemas import ImportHistoryItem, ImportHistoryResponse, ImportIngestResponse, ImportProfileResponse
 from ...services.import_feedback import build_import_warnings
 from ...services.import_parser import parse_milkmaster_customer_workbook
+from ...services.customer_analytics import build_cached_customer_records
 from ...services.import_service import (
     create_import_job,
     get_current_import_job,
@@ -83,6 +86,31 @@ def import_history(limit: int = 50) -> ImportHistoryResponse:
             detail="DATABASE_URL is not configured for history.",
         )
     if not is_db_available():
+        if settings.allow_local_file_fallback:
+            cached = build_cached_customer_records()
+            if cached is not None:
+                cached_at = cached.get("cached_at")
+                try:
+                    timestamp = datetime.fromisoformat(cached_at) if cached_at else datetime.now()
+                except ValueError:
+                    timestamp = datetime.now()
+                item = ImportHistoryItem(
+                    import_job_id=f"cache-{cached['snapshot_id']}",
+                    file_name="Cached customer snapshot",
+                    status="cached",
+                    row_count=len(cached["records"]),
+                    fingerprint=None,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                    error_summary="Served from local disk cache because the database is unavailable.",
+                    is_current_dataset=True,
+                    file_retained=True,
+                )
+                return ImportHistoryResponse(
+                    current_import_job_id=item.import_job_id,
+                    allowed_upload_roles=settings.upload_allowed_roles,
+                    items=[item],
+                )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Database is configured but not reachable. {get_db_last_error()}",
@@ -176,3 +204,92 @@ async def ingest_import(
         duplicate_of_job_id=warnings.duplicate_of_job_id,
         message="Import queued. The background worker will validate and replace the live dataset.",
     )
+
+
+# ----------------------------------------------------------------------
+# Sales transactions import — separate flow from the customer master.
+# Customer data lives in Supabase; sales data lives on local disk as
+# Parquet (+ CSV.gz fallback). This pipeline parses an uploaded sales
+# CSV/XLSX, validates, atomically replaces the live store, invalidates
+# embedding/schema caches, and kicks a background re-warmup so the chat
+# picks up new product names.
+# ----------------------------------------------------------------------
+from ...services import sales_import as _sales
+
+
+@router.post("/sales/profile")
+async def profile_sales(file: UploadFile = File(...)) -> dict:
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
+    return _sales.profile(payload, file.filename or "sales.csv")
+
+
+@router.post("/sales")
+async def commit_sales(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    confirm_replace: str = Form("false"),
+    actor_role: str | None = Header(default=None, alias="X-MrMilk-Role"),
+) -> dict:
+    role = _ensure_upload_role(actor_role)
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
+
+    # Re-validate to detect blocked uploads even if the client skipped /profile
+    profile_result = _sales.profile(payload, file.filename or "sales.csv")
+    if profile_result.get("blocked"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Sales file is missing required columns.",
+                "missing_required": profile_result.get("missing_required", []),
+                "warnings": profile_result.get("warnings", []),
+            },
+        )
+    has_warnings = bool(profile_result.get("warnings"))
+    if has_warnings and confirm_replace.lower() != "true":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "Validation warnings present. Re-submit with confirm_replace=true to override.",
+                "warnings": profile_result.get("warnings", []),
+            },
+        )
+
+    result = _sales.commit(payload, file.filename or "sales.csv")
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"message": "Sales import failed.", "error": result.get("error"), "detail": result.get("detail")},
+        )
+
+    # Background: re-warm the embedding index so new product names are searchable.
+    # Done after returning so the user sees "imported" immediately.
+    def _rewarm() -> None:
+        try:
+            with session_scope() as s:
+                _sales.schedule_embedding_rewarm(s)
+        except Exception:  # noqa: BLE001
+            # Non-fatal — first chat query will rebuild lazily.
+            pass
+
+    background_tasks.add_task(_rewarm)
+
+    return {
+        "ok": True,
+        "role": role,
+        "meta": result["meta"],
+        "message": (
+            f"Sales report imported: {result['meta']['row_count']:,} rows. "
+            "Embedding index is rebuilding in the background — new product/area names "
+            "will be searchable in chat within ~30 seconds."
+        ),
+    }
+
+
+@router.get("/sales/status")
+async def sales_status() -> dict:
+    meta = _sales.read_meta()
+    return {"current": meta, "has_data": meta is not None}

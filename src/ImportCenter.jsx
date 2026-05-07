@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./import-center.css";
-import { fetchImportHistory, profileImportFile, queueImportFile } from "./utils/importApi.js";
+import {
+  commitSalesFile,
+  fetchImportHistory,
+  fetchSalesStatus,
+  profileImportFile,
+  profileSalesFile,
+  queueImportFile,
+} from "./utils/importApi.js";
 
 const STATUS_META = {
   queued: { label: "Queued", tone: "queued" },
@@ -42,7 +49,7 @@ function buildRowDelta(profile) {
   return `${Math.abs(delta).toLocaleString("en-IN")} rows ${direction} than the current live dataset.`;
 }
 
-export default function ImportCenter({ role, roleMeta, onBackToDashboard }) {
+export default function ImportCenter({ role, roleMeta, onBackToDashboard, onImportSucceeded }) {
   const fileInputRef = useRef(null);
   const [historyItems, setHistoryItems] = useState([]);
   const [allowedRoles, setAllowedRoles] = useState([]);
@@ -55,6 +62,19 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard }) {
   const [uploading, setUploading] = useState(false);
   const [confirmWarnings, setConfirmWarnings] = useState(false);
   const [notice, setNotice] = useState("");
+
+  // Sales transactions upload state — runs alongside customer master,
+  // backed by /api/imports/sales/* (parquet on disk, no DB rows).
+  const salesFileInputRef = useRef(null);
+  const [salesStatus, setSalesStatus] = useState(null);
+  const [salesStatusError, setSalesStatusError] = useState("");
+  const [salesFile, setSalesFile] = useState(null);
+  const [salesProfile, setSalesProfile] = useState(null);
+  const [salesProfileError, setSalesProfileError] = useState("");
+  const [salesProfiling, setSalesProfiling] = useState(false);
+  const [salesUploading, setSalesUploading] = useState(false);
+  const [salesConfirmWarnings, setSalesConfirmWarnings] = useState(false);
+  const [salesNotice, setSalesNotice] = useState("");
 
   const refreshHistory = useCallback(async () => {
     setHistoryError("");
@@ -86,6 +106,34 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard }) {
     return () => window.clearInterval(timer);
   }, [hasRunningJob, refreshHistory]);
 
+  // ------------------------------------------------------------------
+  // Auto-aggregate: when a job transitions from queued/processing to
+  // succeeded, poke the parent so the Dashboard pulls the new snapshot.
+  // On first mount we seed the set with existing succeeded IDs so the
+  // already-current dataset doesn't trigger a spurious refresh.
+  // ------------------------------------------------------------------
+  const firedSucceededIds = useRef(new Set());
+  const seededSucceededIdsRef = useRef(false);
+  useEffect(() => {
+    if (!historyItems.length) return;
+    if (!seededSucceededIdsRef.current) {
+      historyItems.forEach((item) => {
+        if (item.status === "succeeded") firedSucceededIds.current.add(item.import_job_id);
+      });
+      seededSucceededIdsRef.current = true;
+      return;
+    }
+    if (!onImportSucceeded) return;
+    for (const item of historyItems) {
+      if (item.status === "succeeded" && item.is_current_dataset && !firedSucceededIds.current.has(item.import_job_id)) {
+        firedSucceededIds.current.add(item.import_job_id);
+        // 400ms buffer so the backend finishes marking is_current + flushing
+        // the last records batch before the dashboard re-fetches.
+        setTimeout(() => onImportSucceeded(item), 400);
+      }
+    }
+  }, [historyItems, onImportSucceeded]);
+
   const currentDataset = useMemo(
     () => historyItems.find((item) => item.is_current_dataset) || null,
     [historyItems],
@@ -97,6 +145,84 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard }) {
   }, [allowedRoles, role]);
 
   const rowDelta = useMemo(() => buildRowDelta(profile), [profile]);
+
+  // ------------------------------------------------------------------
+  // Sales transactions: status fetch + profile + commit handlers
+  // ------------------------------------------------------------------
+  const refreshSalesStatus = useCallback(async () => {
+    setSalesStatusError("");
+    try {
+      const payload = await fetchSalesStatus();
+      setSalesStatus(payload);
+    } catch (err) {
+      setSalesStatusError(err.message || "Could not load sales status.");
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSalesStatus();
+  }, [refreshSalesStatus]);
+
+  const handleSalesProfile = useCallback(async (file) => {
+    if (!file) return;
+    setSalesProfiling(true);
+    setSalesProfile(null);
+    setSalesProfileError("");
+    setSalesNotice("");
+    setSalesConfirmWarnings(false);
+    try {
+      const payload = await profileSalesFile(file);
+      setSalesProfile(payload);
+    } catch (err) {
+      setSalesProfileError(err.message || "Could not inspect this sales file.");
+    } finally {
+      setSalesProfiling(false);
+    }
+  }, []);
+
+  const onSalesFileSelected = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setSalesFile(file);
+    await handleSalesProfile(file);
+    if (event.target) event.target.value = "";
+  };
+
+  const handleCommitSales = async () => {
+    if (!salesFile || !salesProfile) return;
+    if (salesProfile.blocked) return;
+    if ((salesProfile.warnings || []).length && !salesConfirmWarnings) {
+      setSalesProfileError("Acknowledge the warnings before replacing the sales report.");
+      return;
+    }
+    setSalesUploading(true);
+    setSalesProfileError("");
+    setSalesNotice("");
+    try {
+      const payload = await commitSalesFile({
+        file: salesFile,
+        role,
+        confirmReplace: (salesProfile.warnings || []).length > 0,
+      });
+      setSalesNotice(payload.message || "Sales report imported.");
+      setSalesFile(null);
+      setSalesProfile(null);
+      setSalesConfirmWarnings(false);
+      await refreshSalesStatus();
+      // Pull dashboard refresh too — chat now sees new product names.
+      if (onImportSucceeded) {
+        onImportSucceeded({ kind: "sales", file_name: payload?.meta?.file_name });
+      }
+    } catch (err) {
+      const detail = err.detail;
+      if (detail && typeof detail === "object" && detail.warnings) {
+        setSalesProfile((c) => (c ? { ...c, warnings: detail.warnings } : c));
+      }
+      setSalesProfileError(err.message || "The sales import could not be queued.");
+    } finally {
+      setSalesUploading(false);
+    }
+  };
 
   const handleProfile = useCallback(async (file) => {
     if (!file) return;
@@ -419,6 +545,206 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard }) {
           <div className="import-center__emptyState">No imports have been recorded yet.</div>
         )}
       </section>
+
+      {/* ===========================================================
+          Sales transactions — parallel upload track.
+          Backed by /api/imports/sales/* (parquet on disk).
+          =========================================================== */}
+      <div className="import-center__grid" style={{ marginTop: 24 }}>
+        <section className="import-center__panel import-center__panel--current">
+          <div className="import-center__panelHead">
+            <span className="import-center__panelEyebrow">Sales report (current)</span>
+            {salesStatus?.has_data ? (
+              <span className="import-center__status import-center__status--success">Loaded</span>
+            ) : (
+              <span className="import-center__status import-center__status--queued">Empty</span>
+            )}
+          </div>
+          {salesStatusError && (
+            <div className="import-center__error" style={{ marginTop: 10 }}>
+              {salesStatusError}
+            </div>
+          )}
+          {salesStatus?.has_data && salesStatus.current ? (
+            <div className="import-center__datasetMeta">
+              <div className="import-center__datasetName">{salesStatus.current.file_name || "Sales transactions"}</div>
+              <div className="import-center__datasetStats">
+                <div>
+                  <span className="import-center__panelEyebrow">Rows</span>
+                  <strong>
+                    {salesStatus.current.row_count != null
+                      ? formatCount(salesStatus.current.row_count)
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="import-center__panelEyebrow">Date range</span>
+                  <strong>
+                    {salesStatus.current.date_range?.from
+                      ? `${salesStatus.current.date_range.from} → ${salesStatus.current.date_range.to || "?"}`
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="import-center__panelEyebrow">Uploaded</span>
+                  <strong>{formatDateTime(salesStatus.current.uploaded_at)}</strong>
+                </div>
+                {salesStatus.current.distinct_counts?.product_name != null && (
+                  <div>
+                    <span className="import-center__panelEyebrow">Distinct products</span>
+                    <strong>{formatCount(salesStatus.current.distinct_counts.product_name)}</strong>
+                  </div>
+                )}
+                {salesStatus.current.distinct_counts?.area != null && (
+                  <div>
+                    <span className="import-center__panelEyebrow">Distinct areas</span>
+                    <strong>{formatCount(salesStatus.current.distinct_counts.area)}</strong>
+                  </div>
+                )}
+              </div>
+              <p className="import-center__datasetHint">
+                Sales transactions are stored as Parquet on disk (does not consume Supabase quota).
+                Replacing this file rebuilds the chat embedding index in the background so new
+                product names become searchable within ~30 seconds.
+              </p>
+            </div>
+          ) : (
+            <div className="import-center__emptyState">
+              No sales report uploaded yet. Upload a CSV / XLSX with at least these columns:
+              <code> mobile, product_name, sub_total, date</code>.
+            </div>
+          )}
+        </section>
+
+        <section className="import-center__panel import-center__panel--upload">
+          <div className="import-center__panelHead">
+            <span className="import-center__panelEyebrow">Upload sales report</span>
+            {!canReplaceDataset && (
+              <span className="import-center__status import-center__status--processing">Read-only</span>
+            )}
+          </div>
+
+          <p className="import-center__panelHint">
+            Validate the next sales export. Same role rules as customer master uploads — only
+            roles in {allowedRoles.join(", ") || "owner / ops"} can replace it.
+          </p>
+
+          <div className="import-center__uploadRow">
+            <input
+              ref={salesFileInputRef}
+              type="file"
+              accept=".csv,.tsv,.xlsx,.xls,.csv.gz"
+              onChange={onSalesFileSelected}
+              disabled={salesProfiling || salesUploading || !canReplaceDataset}
+              style={{ display: "none" }}
+            />
+            <button
+              type="button"
+              className="import-center__primaryButton"
+              onClick={() => salesFileInputRef.current?.click()}
+              disabled={salesProfiling || salesUploading || !canReplaceDataset}
+            >
+              {salesProfiling ? "Inspecting..." : salesFile ? "Choose different file" : "Choose sales file"}
+            </button>
+            {salesFile && !salesProfiling && (
+              <span className="import-center__uploadFile">{salesFile.name}</span>
+            )}
+          </div>
+
+          {salesProfileError && (
+            <div className="import-center__error">{salesProfileError}</div>
+          )}
+
+          {salesProfile && (
+            <div className="import-center__profile">
+              <div className="import-center__profileGrid">
+                <div>
+                  <span className="import-center__panelEyebrow">Rows in file</span>
+                  <strong>{formatCount(salesProfile.row_count)}</strong>
+                </div>
+                <div>
+                  <span className="import-center__panelEyebrow">Date range</span>
+                  <strong>
+                    {salesProfile.date_range?.from
+                      ? `${salesProfile.date_range.from} → ${salesProfile.date_range.to || "?"}`
+                      : "—"}
+                  </strong>
+                </div>
+                <div>
+                  <span className="import-center__panelEyebrow">Required columns matched</span>
+                  <strong>{(salesProfile.columns_matched || []).length} / 4</strong>
+                </div>
+                <div>
+                  <span className="import-center__panelEyebrow">Distinct products</span>
+                  <strong>
+                    {salesProfile.distinct_counts?.product_name != null
+                      ? formatCount(salesProfile.distinct_counts.product_name)
+                      : "—"}
+                  </strong>
+                </div>
+              </div>
+
+              {salesProfile.blocked && (salesProfile.missing_required || []).length > 0 && (
+                <div className="import-center__error">
+                  Cannot replace: missing required columns ({salesProfile.missing_required.join(", ")}).
+                </div>
+              )}
+
+              {(salesProfile.warnings || []).length > 0 && (
+                <ul className="import-center__warnings">
+                  {salesProfile.warnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              )}
+
+              {(salesProfile.warnings || []).length > 0 && !salesProfile.blocked && (
+                <label className="import-center__confirm">
+                  <input
+                    type="checkbox"
+                    checked={salesConfirmWarnings}
+                    onChange={(e) => setSalesConfirmWarnings(e.target.checked)}
+                  />
+                  I have reviewed the warnings above and want to proceed.
+                </label>
+              )}
+
+              <div className="import-center__uploadActions">
+                <button
+                  type="button"
+                  className="import-center__primaryButton"
+                  onClick={handleCommitSales}
+                  disabled={
+                    salesUploading ||
+                    salesProfile.blocked ||
+                    !canReplaceDataset ||
+                    ((salesProfile.warnings || []).length > 0 && !salesConfirmWarnings)
+                  }
+                >
+                  {salesUploading ? "Replacing..." : "Replace sales report"}
+                </button>
+                <button
+                  type="button"
+                  className="import-center__ghostButton"
+                  onClick={() => {
+                    setSalesFile(null);
+                    setSalesProfile(null);
+                    setSalesProfileError("");
+                    setSalesConfirmWarnings(false);
+                  }}
+                  disabled={salesUploading}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {salesNotice && (
+            <div className="import-center__notice">{salesNotice}</div>
+          )}
+        </section>
+      </div>
     </div>
   );
 }

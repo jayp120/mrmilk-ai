@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json as _json
+
 import httpx
 from fastapi import APIRouter, Header, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ...config import get_settings
+from ...db import is_db_available, is_db_configured, session_scope
+from ...services.ai_agent import run_agent, stream_agent
+from ...services.ai_schema import NotebookResponse
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -13,7 +19,7 @@ NVIDIA_BASE = "https://integrate.api.nvidia.com/v1/chat/completions"
 OPENAI_BASE = "https://api.openai.com/v1/chat/completions"
 
 DEFAULT_MODELS = {
-    "gemini": "gemini-2.5-flash",
+    "gemini": "gemini-2.5-pro",
     "nvidia": "qwen/qwen2-7b-instruct",
     "openai": "gpt-4.1-mini",
 }
@@ -128,3 +134,98 @@ async def chat(
         )
 
     return ChatResponse(text=text, used_search=False, provider=provider, model=model)
+
+
+# ----------------------------------------------------------------------
+# Notebook-style chat: Gemini function calling over live Supabase data.
+# Returns a list of .deepnote-schema blocks for a notebook renderer.
+# ----------------------------------------------------------------------
+class NotebookChatRequest(BaseModel):
+    question: str
+    history: list[HistoryMessage] = []
+    model: str | None = None
+
+
+@router.post("/notebook", response_model=NotebookResponse)
+async def chat_notebook(request: NotebookChatRequest) -> NotebookResponse:
+    if not is_db_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DATABASE_URL is not configured — notebook chat requires a live Supabase snapshot.",
+        )
+    if not is_db_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is not reachable right now. Try again in a moment.",
+        )
+
+    history_dicts = [{"role": m.role, "content": m.content} for m in request.history]
+    with session_scope() as session:
+        return await run_agent(
+            session=session,
+            question=request.question,
+            history=history_dicts,
+            model=request.model,
+        )
+
+
+# ----------------------------------------------------------------------
+# Streaming notebook-chat (Server-Sent Events)
+#
+# Emits each agent step live so the UI can show a Deepnote-style execution
+# trail (Planning → Calling tool → Tool done → Composing → Final blocks).
+#
+# SSE wire format per event:
+#   event: <type>\n
+#   data: <json-serialised payload>\n
+#   \n
+# Terminal event is always `done`.
+# ----------------------------------------------------------------------
+def _sse_line(event: dict) -> str:
+    name = event.get("event", "message")
+    payload = event.get("data")
+    # json.dumps always produces a string; SSE `data:` lines must not contain
+    # raw newlines, which json.dumps avoids by default (no indent).
+    return f"event: {name}\ndata: {_json.dumps(payload, default=str)}\n\n"
+
+
+@router.post("/notebook/stream")
+async def chat_notebook_stream(request: NotebookChatRequest):
+    if not is_db_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DATABASE_URL is not configured — notebook chat requires a live Supabase snapshot.",
+        )
+    if not is_db_available():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database is not reachable right now. Try again in a moment.",
+        )
+
+    history_dicts = [{"role": m.role, "content": m.content} for m in request.history]
+
+    async def generator():
+        # Keep the DB session alive for the full streaming lifetime.
+        # `session_scope` is a sync contextmanager, so we use it inline.
+        try:
+            with session_scope() as session:
+                async for event in stream_agent(
+                    session=session,
+                    question=request.question,
+                    history=history_dicts,
+                    model=request.model,
+                ):
+                    yield _sse_line(event)
+        except Exception as exc:  # noqa: BLE001
+            yield _sse_line({"event": "error", "data": {"message": str(exc)}})
+            yield _sse_line({"event": "done", "data": None})
+
+    return StreamingResponse(
+        generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # tell reverse proxies (nginx) not to buffer
+            "Connection": "keep-alive",
+        },
+    )

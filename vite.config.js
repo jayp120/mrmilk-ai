@@ -1,8 +1,31 @@
+import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@": fileURLToPath(new URL("./src", import.meta.url)),
+    },
+  },
   optimizeDeps: {
-    include: ["react", "react-dom", "echarts", "echarts-for-react", "papaparse", "xlsx", "@tanstack/react-table", "@duckdb/duckdb-wasm", "json-rules-engine", "date-fns", "uuid"]
+    force: true,
+    include: [
+      "react",
+      "react-dom",
+      "framer-motion",
+      "lucide-react",
+      "clsx",
+      "tailwind-merge",
+      "echarts",
+      "echarts-for-react",
+      "papaparse",
+      "xlsx",
+      "@tanstack/react-table",
+      "@duckdb/duckdb-wasm",
+      "json-rules-engine",
+      "date-fns",
+      "uuid"
+    ]
   },
   build: {
     target: "es2020",

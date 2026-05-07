@@ -1,7 +1,13 @@
 from fastapi import APIRouter, HTTPException, status
 
+from ...config import get_settings
 from ...db import get_db_last_error, is_db_available, is_db_configured, session_scope
-from ...services.customer_analytics import build_customer_records, build_customer_summary
+from ...services.customer_analytics import (
+    build_cached_customer_records,
+    build_cached_customer_summary,
+    build_customer_records,
+    build_customer_summary,
+)
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
 
@@ -12,6 +18,10 @@ def _require_db() -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="DATABASE_URL is not configured.",
         )
+
+
+def _allow_cache_fallback() -> bool:
+    return get_settings().allow_local_file_fallback
     if not is_db_available():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -26,6 +36,11 @@ def customer_summary() -> dict:
     the same shape as the hardcoded DATA object the workspace uses, but
     computed fresh from the database.
     """
+    if not is_db_available() and _allow_cache_fallback():
+        cached = build_cached_customer_summary()
+        if cached is not None:
+            return cached
+
     _require_db()
     with session_scope() as session:
         summary = build_customer_summary(session)
@@ -45,6 +60,11 @@ def customer_records() -> dict:
     normalised to the shape the workspace expects for client-side
     DuckDB queries and customer match filtering.
     """
+    if not is_db_available() and _allow_cache_fallback():
+        cached = build_cached_customer_records()
+        if cached is not None:
+            return {"snapshot_id": cached["snapshot_id"], "records": cached["records"], "snapshot_source": "disk-cache"}
+
     _require_db()
     with session_scope() as session:
         summary = build_customer_summary(session)

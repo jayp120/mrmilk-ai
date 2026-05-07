@@ -6,6 +6,8 @@ dist/
 !backend/.env.example
 *.local
 *.log
+*.err
+*.out
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -18,4 +20,5 @@ __pycache__/
 backend/.venv/
 backend/.runtime/
 backend/backend/
+backend/.cache/
 .claude/

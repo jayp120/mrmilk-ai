@@ -99,6 +99,27 @@ def ingest_full_snapshot(session: Session, *, job_id: str, parsed: ParsedWorkboo
             session.commit()
             session.refresh(snapshot)
 
+        # New snapshot is live — drop cached aggregates/records for the
+        # previous snapshot, then eagerly warm the new one so the dashboard
+        # + run_python don't hit the slow cross-region scan on their first
+        # request. This also writes the new snapshot to the on-disk cache.
+        from ..db import session_scope as _warm_session_scope
+        from .customer_analytics import invalidate_analytics_cache, warmup_records_cache
+        from .data_summary import invalidate as invalidate_schema_summary
+        from .embeddings import invalidate as invalidate_embeddings
+        invalidate_analytics_cache()
+        invalidate_schema_summary()
+        invalidate_embeddings()
+        try:
+            with _warm_session_scope() as warm_session:
+                warmup_records_cache(warm_session)
+                # Schema + embeddings will rebuild lazily on first chat.
+                # We could warm them here too, but the embedding API call
+                # latency would block the import-completion ack.
+        except Exception:  # noqa: BLE001
+            # Non-fatal — first user request will trigger the warmup lazily.
+            pass
+
         for storage_key in previous_storage_refs.values():
             try:
                 delete_import_copy(storage_key)

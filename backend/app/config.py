@@ -30,9 +30,13 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     nvidia_api_key: str | None = Field(default=None, alias="NVIDIA_API_KEY")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    e2b_api_key: str | None = Field(default=None, alias="E2B_API_KEY")
 
     allowed_origins_raw: str = Field(
-        default="http://localhost:5000,http://localhost:5173,http://127.0.0.1:5000,http://127.0.0.1:5173",
+        default=(
+            "http://localhost:3000,http://localhost:5000,http://localhost:5173,http://localhost:4173,"
+            "http://127.0.0.1:3000,http://127.0.0.1:5000,http://127.0.0.1:5173,http://127.0.0.1:4173"
+        ),
         alias="ALLOWED_ORIGINS",
     )
 

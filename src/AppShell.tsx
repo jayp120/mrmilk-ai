@@ -1,10 +1,12 @@
 import React, { Suspense, useEffect, useState } from "react";
-import LandingPage from "./LandingPage.jsx";
-import "./landing.css";
+
+import LandingPage from "@/LandingPage";
 
 const Workspace = React.lazy(() => import("../mrmilk-ai.jsx"));
 
-function readView() {
+type View = "landing" | "workspace";
+
+function readView(): View {
   if (typeof window === "undefined") {
     return "landing";
   }
@@ -13,7 +15,7 @@ function readView() {
   return url.searchParams.get("view") === "workspace" ? "workspace" : "landing";
 }
 
-function writeView(nextView, mode = "push") {
+function writeView(nextView: View, mode: "push" | "replace" = "push") {
   const url = new URL(window.location.href);
 
   if (nextView === "workspace") {
@@ -27,7 +29,7 @@ function writeView(nextView, mode = "push") {
 }
 
 export default function AppShell() {
-  const [view, setView] = useState(() => readView());
+  const [view, setView] = useState<View>(() => readView());
 
   useEffect(() => {
     const syncView = () => setView(readView());
@@ -38,8 +40,8 @@ export default function AppShell() {
   useEffect(() => {
     document.title =
       view === "workspace"
-        ? "Mr Milk AI OS Workspace"
-        : "Mr Milk AI OS | Premium Dairy Intelligence";
+        ? "Mr. Milk AI OS Workspace"
+        : "Mr. Milk AI OS | Premium dairy intelligence";
   }, [view]);
 
   const openWorkspace = () => {
@@ -56,16 +58,18 @@ export default function AppShell() {
 
   if (view === "workspace") {
     return (
-      <div className="workspace-shell">
+      <div className="relative bg-[#06070a] text-white">
         <Suspense
           fallback={
-            <div className="workspace-loading">
-              <div className="workspace-loading__panel">
-                <span className="workspace-loading__eyebrow">Mr Milk AI OS</span>
-                <h1>Loading the live workspace.</h1>
-                <p>
-                  The landing page stays lightweight by loading the analytics and chat workspace
-                  only when you open it.
+            <div className="grid min-h-screen place-items-center px-6 py-10">
+              <div className="milk-panel w-full max-w-2xl rounded-[32px] p-8 md:p-10">
+                <span className="milk-eyebrow">Mr. Milk AI OS</span>
+                <h1 className="mt-4 font-display text-[clamp(2.7rem,5vw,4.6rem)] leading-[0.95] tracking-[-0.045em] text-white">
+                  Loading the live workspace.
+                </h1>
+                <p className="mt-4 max-w-xl text-base leading-8 text-white/60">
+                  The landing page stays restrained by loading the analytics and chat workspace only
+                  when you open it.
                 </p>
               </div>
             </div>
@@ -74,7 +78,11 @@ export default function AppShell() {
           <Workspace />
         </Suspense>
 
-        <button type="button" className="workspace-back" onClick={openLanding}>
+        <button
+          type="button"
+          onClick={openLanding}
+          className="fixed bottom-5 right-5 z-50 rounded-full border border-white/[0.12] bg-[#101217]/90 px-5 py-3 text-sm text-white shadow-glow backdrop-blur-xl transition hover:-translate-y-0.5 hover:bg-[#14171d]"
+        >
           Back to landing
         </button>
       </div>

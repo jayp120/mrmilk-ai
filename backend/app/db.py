@@ -38,8 +38,30 @@ def normalize_database_url(url: str | None) -> str | None:
     return urlunsplit(split_url._replace(netloc=repaired_netloc))
 
 
+# Small QueuePool against the Supabase TRANSACTION pooler (port 6543).
+# - pool_size=3 + max_overflow=2 = max 5 warm connections. Transaction-mode
+#   pooler caps at 200+ clients, so this is safe even with multiple workers.
+# - pool_recycle=1800: Supabase's transaction pooler drops idle conns after
+#   ~10 min — recycling ours at 30 min is paranoid but harmless.
+# - pool_pre_ping: one cheap "SELECT 1" before handing out a stale conn
+#   (protects against mid-restart or idle-drop).
+# - prepare_threshold=None: NEVER use server-side prepared statements.
+#   Supabase's transaction pooler routes each transaction to a potentially
+#   different backend connection, which invalidates psycopg's prepared-
+#   statement cache and surfaces as "prepared statement _pg3_X does not
+#   exist" 500s. (Confusingly, 0 means "prepare everything from the first
+#   execution" — we want the opposite.)
 engine = (
-    create_engine(normalize_database_url(settings.database_url), future=True, pool_pre_ping=True)
+    create_engine(
+        normalize_database_url(settings.database_url),
+        future=True,
+        pool_size=3,
+        max_overflow=2,
+        pool_timeout=10,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+        connect_args={"prepare_threshold": None},
+    )
     if settings.db_configured
     else None
 )

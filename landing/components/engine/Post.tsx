@@ -13,7 +13,7 @@ import { Vector2 } from 'three';
 
 export function Post() {
   return (
-    <EffectComposer multisampling={2} disableNormalPass>
+    <EffectComposer multisampling={2}>
       <Bloom
         intensity={0.6}
         luminanceThreshold={0.85}

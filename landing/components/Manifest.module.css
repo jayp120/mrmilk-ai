@@ -66,6 +66,16 @@
   color: var(--ivory);
 }
 
+.input:disabled {
+  color: rgba(244, 236, 225, 0.4);
+  cursor: default;
+}
+
+.submit:disabled {
+  cursor: default;
+  color: var(--ivory);
+}
+
 @media (max-width: 820px) {
   .root {
     padding: 120px var(--page-margin) 96px;

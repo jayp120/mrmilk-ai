@@ -42,6 +42,105 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 PARQUET_PATH = CACHE_DIR / "sales.parquet"
 CSVGZ_PATH = CACHE_DIR / "sales.csv.gz"
 META_PATH = CACHE_DIR / "sales_meta.json"
+LOCK_PATH = CACHE_DIR / "sales_import.lock"
+
+# Upload size guard — applied at the route layer. 200 MB is generous enough
+# for a year of MilkMaster sales (~30 MB compressed) with 6x headroom but
+# small enough that a malicious 10 GB upload can't OOM the server.
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+
+
+# ----------------------------------------------------------------------
+# Cross-process write lock — prevents two concurrent uploads from racing
+# read-modify-write on sales.parquet (which would silently drop one side's
+# rows). Built on a file lock so it survives process restart.
+# ----------------------------------------------------------------------
+import contextlib
+import threading
+import time
+
+# In-process serialization for the same uvicorn worker
+_write_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _exclusive_dataset_lock(timeout_seconds: float = 60.0):
+    """Best-effort cross-process + in-process write lock around the sales
+    dataset. Uses an exclusive file create (O_EXCL) on POSIX/Windows so two
+    workers can't both think they own the dataset. Falls back to in-process
+    only if the OS file system doesn't support O_EXCL.
+    """
+    _write_lock.acquire(timeout=timeout_seconds)
+    fd = None
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        while True:
+            try:
+                # O_EXCL: fail if file exists. Atomic on all major filesystems.
+                fd = os.open(str(LOCK_PATH), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode("ascii"))
+                break
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"sales_import: could not acquire write lock within {timeout_seconds}s. "
+                        "Another upload may be in progress, or a previous upload crashed without "
+                        f"releasing the lock at {LOCK_PATH}."
+                    )
+                time.sleep(0.5)
+            except OSError as exc:
+                # Filesystem doesn't support O_EXCL — degrade gracefully to thread lock only.
+                logger.warning("sales_import: file lock unavailable (%s), using in-process lock only", exc)
+                break
+        yield
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                LOCK_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _write_lock.release()
+
+
+def _atomic_write_dataset(df) -> None:
+    """Write parquet + csv.gz together — either BOTH swap in or NEITHER.
+    Raises RuntimeError on any write failure with the originals untouched."""
+    parquet_tmp = PARQUET_PATH.with_suffix(".parquet.tmp")
+    csvgz_tmp = CSVGZ_PATH.with_suffix(".csv.gz.tmp")
+    # Clean stale tmps from any previous crash
+    for p in (parquet_tmp, csvgz_tmp):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+    try:
+        df.to_parquet(parquet_tmp, compression="snappy", index=False)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            parquet_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"parquet write failed: {exc}") from exc
+    try:
+        df.to_csv(csvgz_tmp, index=False, compression="gzip")
+    except Exception as exc:  # noqa: BLE001
+        # Roll back the successful parquet tmp so we don't half-swap
+        try:
+            parquet_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            csvgz_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError(f"csv.gz write failed: {exc}") from exc
+    # Both tmps wrote OK — swap atomically
+    os.replace(parquet_tmp, PARQUET_PATH)
+    os.replace(csvgz_tmp, CSVGZ_PATH)
 
 # Required columns (after rename). Either the canonical name or any of the
 # accepted aliases must be present in the input.
@@ -255,52 +354,36 @@ def commit(buffer: bytes, file_name: str) -> dict[str, Any]:
     if df.empty:
         return {"ok": False, "error": "empty_after_parse"}
 
-    parquet_tmp = PARQUET_PATH.with_suffix(".parquet.tmp")
-    csvgz_tmp = CSVGZ_PATH.with_suffix(".csv.gz.tmp")
-    try:
-        df.to_parquet(parquet_tmp, compression="snappy", index=False)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("sales_import: parquet write failed: %s — falling back to CSV.gz only", exc)
+    with _exclusive_dataset_lock():
         try:
-            parquet_tmp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
-            pass
-    try:
-        df.to_csv(csvgz_tmp, index=False, compression="gzip")
-    except Exception as exc:  # noqa: BLE001
-        logger.error("sales_import: csv.gz write failed: %s", exc)
-        return {"ok": False, "error": "write_failed", "detail": str(exc)}
+            _atomic_write_dataset(df)
+        except RuntimeError as exc:
+            return {"ok": False, "error": "write_failed", "detail": str(exc)}
 
-    # Atomic swap — both files at once
-    if parquet_tmp.is_file():
-        os.replace(parquet_tmp, PARQUET_PATH)
-    if csvgz_tmp.is_file():
-        os.replace(csvgz_tmp, CSVGZ_PATH)
+        # Date range for meta
+        date_range = {"from": "", "to": ""}
+        if "date" in df.columns:
+            try:
+                date_range["from"] = pd.to_datetime(df["date"]).min().strftime("%Y-%m-%d")
+                date_range["to"] = pd.to_datetime(df["date"]).max().strftime("%Y-%m-%d")
+            except Exception:  # noqa: BLE001
+                pass
 
-    # Date range for meta
-    date_range = {"from": "", "to": ""}
-    if "date" in df.columns:
-        try:
-            date_range["from"] = pd.to_datetime(df["date"]).min().strftime("%Y-%m-%d")
-            date_range["to"] = pd.to_datetime(df["date"]).max().strftime("%Y-%m-%d")
-        except Exception:  # noqa: BLE001
-            pass
+        distinct_counts = {}
+        for col in ("product_name", "area", "hub", "mobile"):
+            if col in df.columns:
+                distinct_counts[col] = int(df[col].nunique())
 
-    distinct_counts = {}
-    for col in ("product_name", "area", "hub", "mobile"):
-        if col in df.columns:
-            distinct_counts[col] = int(df[col].nunique())
-
-    meta = {
-        "file_name": file_name,
-        "row_count": int(len(df)),
-        "uploaded_at": datetime.utcnow().isoformat() + "Z",
-        "date_range": date_range,
-        "distinct_counts": distinct_counts,
-        "columns": list(df.columns),
-        "warnings": info["warnings"],
-    }
-    write_meta(meta)
+        meta = {
+            "file_name": file_name,
+            "row_count": int(len(df)),
+            "uploaded_at": datetime.utcnow().isoformat() + "Z",
+            "date_range": date_range,
+            "distinct_counts": distinct_counts,
+            "columns": list(df.columns),
+            "warnings": info["warnings"],
+        }
+        write_meta(meta)
 
     # Invalidate downstream caches so the next chat / dashboard pull
     # rebuilds against the new sales data.
@@ -363,3 +446,411 @@ def schedule_embedding_rewarm(session) -> None:
         warmup(session)
     except Exception as exc:  # noqa: BLE001
         logger.warning("sales_import: embedding rewarm failed: %s", exc)
+
+
+# ----------------------------------------------------------------------
+# APPEND MODE — non-destructive merge of a new sales export into the
+# existing dataset. Designed for the MilkMaster workflow where exports
+# are limited to ~2 months; users incrementally build a full year over
+# 6 uploads without losing history.
+#
+# Dedup key: (date, invoice_id, product_id, mobile)
+# Why composite? `invoice_id` reuses 0 as a placeholder and is reused
+# across line items — only 20k distinct values for 361k rows. The
+# 4-column key gets 99.9% row uniqueness on the real data.
+#
+# Strategies (when the new file's date range overlaps existing data):
+#   - "skip"     → keep existing rows on collision; only append rows whose
+#                  composite key is NOT already in the dataset. SAFE DEFAULT.
+#                  Recommended for "I'm uploading May-Jun, my old data ends
+#                  Apr 24, the Apr overlap is just re-export of correct data."
+#   - "replace"  → for every composite key in the new file, drop the matching
+#                  row from existing, then add the new file's version. Use
+#                  only when MilkMaster fixed an error and you're pulling
+#                  the correction.
+#
+# Atomic write contract identical to commit() — .tmp then os.replace().
+# ----------------------------------------------------------------------
+DEDUP_KEY_COLUMNS = ("date", "invoice_id", "product_id", "mobile", "customer_id")
+
+
+def _read_existing_parquet():
+    """Load the current sales parquet if it exists. Returns None on missing/empty."""
+    if not PARQUET_PATH.is_file():
+        return None
+    try:
+        import pandas as pd
+        df = pd.read_parquet(PARQUET_PATH)
+        return df if not df.empty else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sales_import: existing parquet read failed: %s", exc)
+        return None
+
+
+# Sentinel value used in place of NaN/missing in the dedup key. Distinct
+# from any real value MilkMaster emits (no real mobile or product_id is
+# this literal string), so missing-on-existing and missing-on-new collide
+# on the same key rather than spuriously diverging.
+_NULL_SENTINEL = "__NULL__"
+
+
+def _coerce_dedup_columns(df):
+    """Normalize the dedup-key columns so set membership is stable across the
+    existing dataset and the new file.
+
+    Critical for production safety: pandas can otherwise treat the same row
+    as different (NaN vs "" mobile, missing invoice rendered as 0 vs NaN,
+    string '7' vs int 7, datetime tz vs no-tz, etc.). Every coercion below
+    is deliberate and tested.
+    """
+    import pandas as pd
+    out = df.copy()
+
+    # date → date object (drops time component if any). NaN dates become None.
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date
+
+    # invoice_id → string. Pandas Int64 + NaN doesn't hash consistently
+    # across the existing/new boundary; using a sentinel string for missing
+    # ones lets NaN-NaN match NaN-NaN but NEVER collide with a real
+    # invoice_id=0 (which is a real MilkMaster placeholder for cash pickups).
+    if "invoice_id" in out.columns:
+        s = pd.to_numeric(out["invoice_id"], errors="coerce")
+        out["invoice_id"] = s.apply(
+            lambda v: _NULL_SENTINEL if pd.isna(v) else f"{int(v)}"
+        )
+
+    # product_id → string. Missing → sentinel so two missing-product_id rows
+    # are still treated as the same row (not as distinct unknowns).
+    if "product_id" in out.columns:
+        def _coerce_product(v):
+            if pd.isna(v) or v is None or v == "":
+                return _NULL_SENTINEL
+            return str(v).strip()
+        out["product_id"] = out["product_id"].apply(_coerce_product)
+
+    # customer_id → string. Belt-and-suspenders alongside mobile: two
+    # customers can share a mobile (family / business), but customer_id is
+    # the MilkMaster source-of-truth identifier, so adding it to the key
+    # prevents silent merges across distinct accounts.
+    if "customer_id" in out.columns:
+        def _coerce_customer(v):
+            if pd.isna(v) or v is None or v == "":
+                return _NULL_SENTINEL
+            return str(v).strip().removesuffix(".0")
+        out["customer_id"] = out["customer_id"].apply(_coerce_customer)
+
+    # mobile → string of digits. Critical: pandas string-dtype NaN renders
+    # as "<NA>" while object-dtype NaN renders as "nan"; both must collapse
+    # to the SAME sentinel so existing-side and new-side missing mobiles
+    # collide correctly.
+    if "mobile" in out.columns:
+        def _coerce_mobile(v):
+            if pd.isna(v) or v is None:
+                return _NULL_SENTINEL
+            s = str(v).strip()
+            if not s or s.lower() == "nan" or s == "<NA>":
+                return _NULL_SENTINEL
+            # Strip ".0" trailing from float-cast and any whitespace
+            return s.removesuffix(".0").strip()
+        out["mobile"] = out["mobile"].apply(_coerce_mobile)
+
+    return out
+
+
+def _dedup_key_set(df):
+    """Build a set of tuples (date, invoice_id, product_id, mobile) for O(1) lookup.
+    Raises if a required dedup-key column is missing — silently degrading would
+    cause unbounded duplication on every subsequent upload."""
+    if df is None or df.empty:
+        return set()
+    missing = [c for c in DEDUP_KEY_COLUMNS if c not in df.columns]
+    if missing:
+        raise RuntimeError(
+            f"dedup key column(s) missing from dataframe: {missing}. "
+            "Cannot append safely without these columns; reject the upload "
+            "or fall back to replace mode."
+        )
+    return set(df[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None))
+
+
+def analyze_for_append(buffer: bytes, file_name: str) -> dict[str, Any]:
+    """Dry-run analysis of an append upload. Returns a structured diff the UI
+    can render before the user commits. Does NOT write to disk."""
+    import pandas as pd
+
+    new_df_raw = _read_input(buffer, file_name)
+    info = _normalize(new_df_raw)
+    new_df = info["df"]
+    if info["missing_required"]:
+        return {
+            "ok": False,
+            "error": "missing_required_columns",
+            "detail": info["missing_required"],
+            "warnings": info["warnings"],
+        }
+    if new_df.empty:
+        return {"ok": False, "error": "empty_after_parse", "warnings": info["warnings"]}
+
+    existing_df = _read_existing_parquet()
+    new_df_keyed = _coerce_dedup_columns(new_df)
+
+    new_range = (
+        pd.to_datetime(new_df_keyed["date"]).min().strftime("%Y-%m-%d"),
+        pd.to_datetime(new_df_keyed["date"]).max().strftime("%Y-%m-%d"),
+    )
+
+    if existing_df is None:
+        return {
+            "ok": True,
+            "first_upload": True,
+            "existing_range": None,
+            "existing_row_count": 0,
+            "new_range": {"from": new_range[0], "to": new_range[1]},
+            "new_file_row_count": int(len(new_df)),
+            "has_overlap": False,
+            "overlap_range": None,
+            "duplicate_count_in_overlap": 0,
+            "truly_new_rows": int(len(new_df)),
+            "projected_total_after_skip": int(len(new_df)),
+            "projected_total_after_replace": int(len(new_df)),
+            "warnings": info["warnings"]
+            + ["No existing sales dataset — this upload will become the initial dataset."],
+        }
+
+    existing_keyed = _coerce_dedup_columns(existing_df)
+    existing_range = (
+        pd.to_datetime(existing_keyed["date"]).min().strftime("%Y-%m-%d"),
+        pd.to_datetime(existing_keyed["date"]).max().strftime("%Y-%m-%d"),
+    )
+
+    # Overlap by date range (string comparison works because ISO YYYY-MM-DD sorts correctly)
+    overlap_start = max(existing_range[0], new_range[0])
+    overlap_end = min(existing_range[1], new_range[1])
+    has_overlap = overlap_start <= overlap_end
+
+    # Composite key membership — compute every projection from row-level
+    # itertuples so multi-row-per-key cases (e.g. existing rows sharing the
+    # invoice_id=0 placeholder) project correctly.
+    existing_keys_list = list(
+        existing_keyed[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None)
+    )
+    existing_keys_set = set(existing_keys_list)
+    new_keys_list = list(
+        new_df_keyed[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None)
+    )
+    new_keys_set = set(new_keys_list)
+    # Rows in the new file whose key collides with existing — what skip drops
+    rows_overlapping_existing = sum(1 for k in new_keys_list if k in existing_keys_set)
+    # Rows in the new file whose key does NOT collide — what skip will keep
+    rows_appended_under_skip = len(new_df) - rows_overlapping_existing
+    # Rows in existing whose key is in the new file — what replace drops
+    rows_in_existing_matching_new = sum(1 for k in existing_keys_list if k in new_keys_set)
+    # Internal dupes within the new file itself
+    internal_dupes_in_new_file = len(new_keys_list) - len(new_keys_set)
+    # Distinct new keys that collide with existing — informational
+    distinct_overlap_keys = len(new_keys_set & existing_keys_set)
+
+    # Gap detection — if the new file's start is more than 1 day after existing end,
+    # there's a gap. Conversely if new file ends before existing starts, weird.
+    gap_warning = None
+    try:
+        existing_max = pd.to_datetime(existing_range[1])
+        new_min = pd.to_datetime(new_range[0])
+        new_max = pd.to_datetime(new_range[1])
+        existing_min = pd.to_datetime(existing_range[0])
+        if new_min > existing_max + pd.Timedelta(days=2):
+            gap = (new_min - existing_max).days
+            gap_warning = f"⚠ Gap of {gap} days between existing data (ending {existing_range[1]}) and new file (starting {new_range[0]}). Some days in between will have no sales data."
+        if new_max < existing_min:
+            gap_warning = (
+                f"⚠ New file ({new_range[0]} → {new_range[1]}) is entirely BEFORE existing data ({existing_range[0]} → {existing_range[1]})."
+                " That's fine — historical backfill — but make sure this is what you intended."
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+    warnings_out = list(info["warnings"])
+    if gap_warning:
+        warnings_out.append(gap_warning)
+
+    # Recommended strategy
+    if rows_overlapping_existing == 0:
+        recommended = "skip"
+        recommendation_reason = "No duplicates — append is a pure addition."
+    elif rows_overlapping_existing == len(new_df):
+        recommended = "skip"
+        recommendation_reason = "Every row in the new file already exists. Committing with 'skip' is a no-op; 'replace' would overwrite existing rows with identical data."
+    else:
+        recommended = "skip"
+        recommendation_reason = "Most uploads are re-exports of the same overlap range. 'Skip' keeps existing rows and adds only the truly new ones — safe default."
+
+    if internal_dupes_in_new_file > 0:
+        warnings_out.append(
+            f"⚠ The new file contains {internal_dupes_in_new_file:,} internal duplicate rows (same date/invoice/product/mobile). "
+            "Under 'replace' these will all merge into the existing dataset as one row each (last-seen wins)."
+        )
+
+    return {
+        "ok": True,
+        "first_upload": False,
+        "existing_range": {"from": existing_range[0], "to": existing_range[1]},
+        "existing_row_count": int(len(existing_df)),
+        "new_range": {"from": new_range[0], "to": new_range[1]},
+        "new_file_row_count": int(len(new_df)),
+        "has_overlap": bool(has_overlap),
+        "overlap_range": {"from": overlap_start, "to": overlap_end} if has_overlap else None,
+        # Number of rows in the new file that collide with existing — what skip drops
+        "duplicate_count_in_overlap": int(rows_overlapping_existing),
+        # Number of new-file rows that skip will keep (distinct + non-colliding rows
+        # in the new file. NOTE: this includes internal dupes within the new file
+        # that don't collide with existing — accept this as the cost of being
+        # consistent with what commit() actually writes under 'skip')
+        "truly_new_rows": int(rows_appended_under_skip),
+        # Skip: existing + rows_appended_under_skip
+        "projected_total_after_skip": int(len(existing_df) + rows_appended_under_skip),
+        # Replace: existing minus ALL rows in existing whose key is in new,
+        # plus the deduped new file (distinct keys only). The drop side has
+        # to be row-counted, not key-counted, because existing may have
+        # multiple rows sharing the same composite key.
+        "projected_total_after_replace": int(
+            len(existing_df) - rows_in_existing_matching_new + len(new_keys_set)
+        ),
+        "recommended_strategy": recommended,
+        "recommendation_reason": recommendation_reason,
+        "dedup_key": list(DEDUP_KEY_COLUMNS),
+        "internal_duplicates_in_new_file": int(internal_dupes_in_new_file),
+        "warnings": warnings_out,
+    }
+
+
+def commit_append(buffer: bytes, file_name: str, strategy: str = "skip") -> dict[str, Any]:
+    """Commit an append-mode upload. strategy = 'skip' (default, safe) or 'replace'."""
+    import pandas as pd
+
+    if strategy not in ("skip", "replace"):
+        return {"ok": False, "error": "invalid_strategy", "detail": f"strategy must be 'skip' or 'replace', got {strategy!r}"}
+
+    new_df_raw = _read_input(buffer, file_name)
+    info = _normalize(new_df_raw)
+    new_df = info["df"]
+    if info["missing_required"]:
+        return {
+            "ok": False,
+            "error": "missing_required_columns",
+            "detail": info["missing_required"],
+            "warnings": info["warnings"],
+        }
+    if new_df.empty:
+        return {"ok": False, "error": "empty_after_parse", "warnings": info["warnings"]}
+
+    # Serialize concurrent uploads — without this, two workers can each read
+    # the same existing_df, each compute a different merged frame, and the
+    # last one to swap wipes the other's append (silent data loss).
+    with _exclusive_dataset_lock():
+        existing_df = _read_existing_parquet()
+
+        if existing_df is None:
+            merged = new_df
+            rows_before = 0
+            duplicate_count = 0
+        else:
+            existing_keyed = _coerce_dedup_columns(existing_df)
+            new_keyed = _coerce_dedup_columns(new_df)
+            try:
+                existing_keys = _dedup_key_set(existing_keyed)
+                new_keys = _dedup_key_set(new_keyed)
+            except RuntimeError as exc:
+                return {"ok": False, "error": "incomplete_dedup_key", "detail": str(exc)}
+            duplicate_count = len(existing_keys & new_keys)
+            rows_before = len(existing_df)
+
+            if strategy == "replace":
+                # Drop the new file's internal duplicates first so 'replace'
+                # honors the docstring "one row per composite key" promise.
+                # Keep LAST seen so corrections in later rows win.
+                new_df_deduped = new_df.copy()
+                new_df_deduped["__key__"] = list(
+                    new_keyed[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None)
+                )
+                new_df_deduped = new_df_deduped.drop_duplicates(
+                    subset=["__key__"], keep="last"
+                ).drop(columns=["__key__"])
+
+                # Drop from existing any row whose key is in the (deduped) new set
+                mask_keep = [
+                    k not in new_keys
+                    for k in existing_keyed[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None)
+                ]
+                kept = existing_df[mask_keep]
+                merged = pd.concat([kept, new_df_deduped], ignore_index=True)
+            else:  # skip
+                # Drop from new the rows whose key is in existing
+                mask_keep_new = [
+                    k not in existing_keys
+                    for k in new_keyed[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None)
+                ]
+                kept_new = new_df[mask_keep_new]
+                merged = pd.concat([existing_df, kept_new], ignore_index=True)
+
+        # Sort by date so the parquet is clean — also makes time-series queries faster
+        if "date" in merged.columns:
+            try:
+                merged = merged.sort_values("date", kind="mergesort").reset_index(drop=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Atomic write — parquet AND csv.gz commit together or neither does
+        try:
+            _atomic_write_dataset(merged)
+        except RuntimeError as exc:
+            return {"ok": False, "error": "write_failed", "detail": str(exc)}
+
+        # Build meta from the MERGED dataset (not just the new file)
+        date_range = {"from": "", "to": ""}
+        if "date" in merged.columns:
+            try:
+                date_range["from"] = pd.to_datetime(merged["date"]).min().strftime("%Y-%m-%d")
+                date_range["to"] = pd.to_datetime(merged["date"]).max().strftime("%Y-%m-%d")
+            except Exception:  # noqa: BLE001
+                pass
+
+        distinct_counts = {}
+        for col in ("product_name", "area", "hub", "mobile"):
+            if col in merged.columns:
+                distinct_counts[col] = int(merged[col].nunique())
+
+        rows_added = int(len(merged) - rows_before)
+
+        meta = {
+            "file_name": file_name,
+            "row_count": int(len(merged)),
+            "uploaded_at": datetime.utcnow().isoformat() + "Z",
+            "date_range": date_range,
+            "distinct_counts": distinct_counts,
+            "columns": list(merged.columns),
+            "warnings": info["warnings"],
+            "merge_strategy": strategy,
+            "append_summary": {
+                "rows_before": rows_before,
+                "new_file_rows": int(len(new_df)),
+                "duplicates_detected": int(duplicate_count),
+                "rows_added": rows_added,
+                "strategy_used": strategy,
+            },
+        }
+        write_meta(meta)
+
+    # Invalidate downstream caches so the next chat / dashboard pull rebuilds
+    try:
+        from .data_summary import invalidate as invalidate_summary
+        from .embeddings import invalidate as invalidate_embeddings
+        invalidate_summary()
+        invalidate_embeddings()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sales_import: cache invalidation warning: %s", exc)
+
+    # Invalidate the DuckDB engine's customer parquet cache too — even though
+    # we only changed sales, the DuckDB views are rebuilt per-query so this is
+    # belt-and-suspenders; the views read the updated sales.parquet next call.
+    return {"ok": True, "meta": meta}

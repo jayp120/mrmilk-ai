@@ -126,3 +126,37 @@ class CustomerRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     snapshot: Mapped["DatasetSnapshot"] = relationship(back_populates="customers")
+
+
+class QueryMemory(Base):
+    """Persistent log of past agent runs.
+
+    Used as few-shot retrieval: when a new question comes in, we embed it
+    and pull the top-K most similar past questions (excluding ones flagged
+    as bad). Their question + tool calls are injected as few-shot examples
+    so the agent benefits from prior successful patterns.
+    """
+    __tablename__ = "query_memory"
+    __table_args__ = (
+        Index("ix_query_memory_snapshot_id", "snapshot_id"),
+        Index("ix_query_memory_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    question: Mapped[str] = mapped_column(Text)
+    # Embedding stored as JSON list[float]. We do top-k cosine in Python at
+    # current scale; switch to pgvector when N > ~5000.
+    embedding: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Compact log of tool calls — name + args + summary per call.
+    tool_calls: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # The most useful generated code (DuckDB SQL or pandas) for retrieval injection.
+    generated_code: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    headline_value: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    blocks_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    validator_verdict: Mapped[str] = mapped_column(String(32), default="unknown")
+    thumbs_up: Mapped[int] = mapped_column(Integer, default=0)
+    thumbs_down: Mapped[int] = mapped_column(Integer, default=0)
+    model_used: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

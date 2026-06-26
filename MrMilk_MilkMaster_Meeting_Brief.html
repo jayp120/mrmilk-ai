@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mr. Milk AI × MilkMaster — Meeting Brief</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:'Segoe UI',system-ui,Arial,sans-serif;color:#1f3550;line-height:1.6;background:#eef3f9;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.page{max-width:900px;margin:0 auto;padding:0 22px 50px}
+.bar{display:flex;align-items:center;padding:12px 0;position:sticky;top:0;background:#eef3f9;z-index:5}
+.print{margin-left:auto;background:#074069;color:#fff;border:none;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer}
+header{background:linear-gradient(135deg,#063a5f,#0a5688 60%,#0d6ea0);color:#eaf3ff;border-radius:18px;padding:30px 30px;box-shadow:0 14px 32px rgba(7,64,105,.18)}
+header .eyebrow{color:#ffe6b8;font-size:12px;letter-spacing:1.6px;text-transform:uppercase;font-weight:700}
+header h1{margin:8px 0 8px;font-size:30px;letter-spacing:-.5px}
+header p{margin:0;color:#cfe0f1;font-size:15px}
+header .who{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+.badge{display:inline-block;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:3px 12px;font-size:12.5px}
+h2{font-size:20px;color:#074069;margin:30px 2px 12px;padding-bottom:8px;border-bottom:2px solid #d7e3f0}
+h3{font-size:15px;color:#1f3550;margin:14px 0 6px}
+.lead{font-size:17px;background:#fff;border:1px solid #d7e3f0;border-left:5px solid #d2ab67;border-radius:12px;padding:16px 18px;margin-top:16px}
+.lead b{color:#074069}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.card{background:#fff;border:1px solid #d7e3f0;border-radius:14px;padding:15px 17px;box-shadow:0 8px 20px rgba(7,64,105,.05)}
+.card h3{margin-top:0}
+.card p,.card li{color:#42607f;font-size:13.5px}
+.card ul{margin:6px 0 0;padding-left:18px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:6px}
+.kpi{background:#fff;border:1px solid #d7e3f0;border-radius:12px;padding:13px 15px}
+.kpi .v{font-size:21px;font-weight:800;color:#074069}
+.kpi .l{font-size:12px;color:#6f86aa;margin-top:3px;font-weight:600}
+.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:8px;align-items:center;margin-top:8px}
+.flow .b{background:#fff;border:1px solid #d7e3f0;border-radius:12px;padding:13px;text-align:center;font-size:13px;font-weight:700;color:#1f3550;box-shadow:0 8px 18px rgba(7,64,105,.05)}
+.flow .b span{display:block;font-weight:500;color:#6f86aa;font-size:11.5px;margin-top:4px}
+.flow .a{font-size:24px;color:#d2ab67;text-align:center}
+.opt{display:flex;gap:14px;align-items:flex-start;background:#fff;border:1px solid #d7e3f0;border-radius:14px;padding:15px 17px;margin-bottom:10px;box-shadow:0 8px 20px rgba(7,64,105,.05)}
+.opt .n{flex:none;width:34px;height:34px;border-radius:50%;background:#074069;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center}
+.opt .n.best{background:#2f7a4f}
+.opt h3{margin:0 0 4px}
+.opt p{margin:0;color:#42607f;font-size:13.5px}
+.tag{display:inline-block;font-size:10.5px;font-weight:700;border-radius:999px;padding:2px 9px;margin-left:6px;vertical-align:middle}
+.tag.best{background:#e6f4ec;color:#2f7a4f}.tag.easy{background:#fff4dc;color:#a07b2d}
+.qbox{background:#fffdf7;border:1px solid #ead4ab;border-radius:12px;padding:14px 18px}
+.qbox ol{margin:6px 0 0;padding-left:20px}.qbox li{margin-bottom:7px;font-size:14px;color:#5a4416}
+.pills{display:flex;flex-wrap:wrap;gap:7px;margin-top:6px}
+.pill{background:#fff;border:1px solid #c7d9ea;border-radius:999px;padding:6px 13px;font-size:13px;color:#33506f;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:8px;background:#fff;border-radius:10px;overflow:hidden}
+th{background:#074069;color:#fff;text-align:left;padding:9px 12px;font-size:12.5px}
+td{padding:8px 12px;border-bottom:1px solid #eef3f9;color:#42607f}
+td b{color:#1f3550}
+.reco{background:#fff;border:1px solid #d7e3f0;border-left:4px solid #d2ab67;border-radius:12px;padding:12px 15px;margin-bottom:9px;font-size:13.5px;color:#42607f}
+.reco b{color:#1f3550}
+.safe .s{background:#fff;border:1px solid #d7e3f0;border-radius:12px;padding:13px 15px;font-size:13.5px}
+.safe .s b{color:#2f7a4f}
+.next{background:#074069;color:#eaf3ff;border-radius:14px;padding:16px 20px;font-size:14.5px}
+.next b{color:#ffe6b8}
+footer{color:#6f86aa;font-size:12px;text-align:center;margin-top:26px}
+.sec{break-inside:avoid}
+@media print{
+  body{background:#fff}.bar{display:none}
+  header,.card,.lead,.kpi,.opt,.flow .b,.safe .s,.next,.qbox,table,.reco{box-shadow:none}
+  h2{break-after:avoid}
+}
+</style></head><body>
+<div class="page">
+  <div class="bar"><button class="print" onclick="window.print()">🖨️ Save as PDF</button></div>
+
+  <header>
+    <div class="eyebrow">Mittal Dairy Farms • Mr. Milk AI OS</div>
+    <h1>Mr. Milk AI × MilkMaster — Integration Brief</h1>
+    <p>A working dairy-intelligence platform, ready to connect to MilkMaster. What we built, how it helps, and what we need.</p>
+    <div class="who"><span class="badge">For: Director (Mr. Milk)</span><span class="badge">MilkMaster — Director</span><span class="badge">MilkMaster — Technical Engineer</span></div>
+  </header>
+
+  <div class="lead">
+    <b>In one line:</b> Mr. Milk has already built a live AI analytics platform on top of MilkMaster’s sales data. Today the data is moved by hand; we want to connect it <b>directly to MilkMaster</b> so it updates automatically — turning daily operations data into decisions, with zero manual work.
+  </div>
+
+  <!-- ===== EXECUTIVE SUMMARY ===== -->
+  <h2 class="sec">Executive summary</h2>
+  <div class="grid">
+    <div class="card"><h3>Where we are</h3><p>A fully working platform running on real MilkMaster data — <b>487,000+ delivery records</b> across <b>Apr 2025 → today</b>. Dashboards, AI insights and reports are live.</p></div>
+    <div class="card"><h3>What we’re asking</h3><p>A <b>read-only</b> data connection from MilkMaster (an API key <em>or</em> an automatic daily file feed) so the platform stays current on its own.</p></div>
+    <div class="card"><h3>Why it matters</h3><p>Faster, data-driven decisions on products, hubs, pricing and retention — and a foundation for AI on top of the dairy’s own numbers.</p></div>
+  </div>
+
+  <!-- ===== WHAT WE WANT ===== -->
+  <h2 class="sec">1 &nbsp;What we want</h2>
+  <p style="margin-top:0">Today, someone exports a sales report from MilkMaster and uploads it into our platform by hand. It works, but it’s manual and can fall behind. We want MilkMaster’s sales/delivery data to flow into Mr. Milk AI <b>automatically and continuously</b>. We do <b>not</b> need to change anything inside MilkMaster — only a read-only way to receive the data.</p>
+
+  <!-- ===== OUR PLATFORM ===== -->
+  <h2 class="sec">2 &nbsp;What our platform is</h2>
+  <p style="margin-top:0"><b>Mr. Milk AI OS</b> is a private operating layer for the dairy business. It takes raw sales/delivery data and turns it into live dashboards, deep analytics, and an AI assistant that answers business questions — every answer backed by the real numbers.</p>
+  <div class="grid">
+    <div class="card"><h3>📊 Live analytics</h3><p>Per-day product sales, hub-wise splits, monthly &amp; seasonal trends, customers and revenue — all interactive.</p></div>
+    <div class="card"><h3>🤖 AI assistant</h3><p>Ask plain-English questions (“how did 1L milk sell in Wakad last month?”) and get answers computed from live data — no guessing.</p></div>
+    <div class="card"><h3>📈 Decisions &amp; reports</h3><p>Auto-generated, data-driven recommendations and one-click exports (Excel + an interactive dashboard report).</p></div>
+  </div>
+
+  <!-- ===== WHAT WE BUILT + HOW ===== -->
+  <h2 class="sec">3 &nbsp;What we’ve built — and how</h2>
+  <p style="margin-top:0">This is not a concept — it is running today on MilkMaster’s exported data.</p>
+  <div class="kpis">
+    <div class="kpi"><div class="v">487,000+</div><div class="l">delivery line-items loaded</div></div>
+    <div class="kpi"><div class="v">Apr 2025 → now</div><div class="l">date coverage</div></div>
+    <div class="kpi"><div class="v">4,348</div><div class="l">active customers</div></div>
+    <div class="kpi"><div class="v">75</div><div class="l">products</div></div>
+    <div class="kpi"><div class="v">3</div><div class="l">distribution hubs</div></div>
+    <div class="kpi"><div class="v">₹4 Cr+</div><div class="l">analysed (1L milk, 1 yr)</div></div>
+  </div>
+
+  <h3>Capabilities already built</h3>
+  <div class="grid">
+    <div class="card"><h3>Automated import pipeline</h3><p>Detects overlap with existing data, removes duplicates, and appends safely — history is never wiped.</p></div>
+    <div class="card"><h3>Daily product sales</h3><p>Any product / pack / date range, split by hub, with seasonality, weekday patterns and moving averages.</p></div>
+    <div class="card"><h3>Hub-wise performance</h3><p>Volume, revenue, share, customers and per-customer benchmarks for every distribution hub.</p></div>
+    <div class="card"><h3>Reports &amp; dashboard export</h3><p>Multi-sheet Excel and a self-contained interactive dashboard with auto-written, data-driven recommendations.</p></div>
+    <div class="card"><h3>Customer intelligence</h3><p>Segmentation, retention/churn signals, campaign calendar and content tools.</p></div>
+    <div class="card"><h3>Secure, multi-user, networked</h3><p>Role-based access (owner / ops / marketing / CRM) and runs across the office network.</p></div>
+  </div>
+
+  <h3>How it’s built (technical)</h3>
+  <table>
+    <tr><th>Layer</th><th>Technology</th><th>Purpose</th></tr>
+    <tr><td><b>Frontend</b></td><td>React + TypeScript (Vite), ECharts</td><td>Interactive dashboards &amp; charts</td></tr>
+    <tr><td><b>Backend</b></td><td>FastAPI (Python)</td><td>Secure API &amp; business logic</td></tr>
+    <tr><td><b>Analytics engine</b></td><td>DuckDB + pandas over columnar Parquet</td><td>Fast queries on 100k+ rows in &lt;1s</td></tr>
+    <tr><td><b>Data store</b></td><td>PostgreSQL (Supabase) + Parquet</td><td>Customer master + transaction history</td></tr>
+    <tr><td><b>AI layer</b></td><td>Google Gemini agent (tool-use)</td><td>Answers grounded on a live data dictionary</td></tr>
+    <tr><td><b>Security</b></td><td>Role-based access, token sessions</td><td>Controlled, read-safe access</td></tr>
+  </table>
+
+  <!-- ===== HOW IT HELPS ===== -->
+  <h2 class="sec">4 &nbsp;How this helps the business</h2>
+  <p style="margin-top:0">The platform already surfaces concrete, money-relevant findings — computed only from the data, e.g.:</p>
+  <div class="reco"><b>Weekday gap:</b> Sundays sell ~10% below Mondays — closing the gap is worth an estimated <b>~5,500 L / year</b> in extra milk.</div>
+  <div class="reco"><b>Hub headroom:</b> Chinchwad averages ~100 L per customer vs Pune’s ~116 — a clear upsell target.</div>
+  <div class="reco"><b>Pricing:</b> realised price is stable (~₹96/L, no erosion) — room to pilot a small premium tier.</div>
+  <div class="reco"><b>Quality:</b> disputed/spoilt is just <b>0.08%</b> of delivered — a strong reliability proof point for marketing.</div>
+  <p style="color:#42607f;font-size:14px">With a live connection, these insights are always current — the dairy sees <b>yesterday’s</b> performance every morning, not last month’s.</p>
+
+  <!-- ===== WHAT WE NEED ===== -->
+  <h2 class="sec">5 &nbsp;What we need from MilkMaster</h2>
+  <p style="margin-top:0"><b>We don’t need to know your database or internal technology.</b> Any <b>one</b> of these read-only options lets us connect — please pick whichever is easiest:</p>
+  <div class="opt"><div class="n best">1</div><div><h3>An API + read-only key <span class="tag best">BEST</span></h3><p>An endpoint we can call for sales/delivery history with a date filter. Fully automatic, always fresh, database-agnostic.</p></div></div>
+  <div class="opt"><div class="n">2</div><div><h3>A scheduled file feed <span class="tag easy">EASIEST</span></h3><p>MilkMaster auto-exports a daily CSV/Excel to SFTP, Google Drive, S3 or email; our platform ingests it automatically.</p></div></div>
+  <div class="opt"><div class="n">3</div><div><h3>Read-only database / replica access</h3><p>Only if the above aren’t possible — a read-only view of the relevant tables. (Here the database type matters.)</p></div></div>
+
+  <h3>Questions for the technical engineer</h3>
+  <div class="qbox"><ol>
+    <li>Is there a <b>REST API</b>? If so: base URL, docs, and a <b>read-only key</b>.</li>
+    <li>Which endpoint returns <b>sales / delivery history</b>, and can we filter by <b>date range</b> (so we pull only new days)?</li>
+    <li>How is it <b>paginated</b>, and what are the <b>rate limits</b>?</li>
+    <li>If no API — can you <b>schedule an automatic export</b> (CSV/Excel) to a folder / Drive / S3 / email?</li>
+    <li>Could you share <b>one sample response</b> and confirm the fields below?</li>
+    <li>Is there a <b>sandbox/test</b> environment, and who is our <b>integration contact</b>?</li>
+  </ol></div>
+
+  <h3>Data fields we need</h3>
+  <div class="pills">
+    <span class="pill">Delivery date</span><span class="pill">Customer (phone / id)</span><span class="pill">Product</span><span class="pill">Pack / weight</span>
+    <span class="pill">Quantity (delivered / net)</span><span class="pill">Amount (₹)</span><span class="pill">Delivery status</span>
+    <span class="pill">Hub / area</span><span class="pill">Invoice id</span>
+  </div>
+  <p style="color:#6f86aa;font-size:12.5px;margin-top:8px">Nice-to-have: ordered/cancelled/returned quantities, delivery boy, route, subscription type, payment mode.</p>
+
+  <!-- ===== HOW IT CONNECTS ===== -->
+  <h2 class="sec">6 &nbsp;How the connection works</h2>
+  <div class="flow">
+    <div class="b">MilkMaster<span>API / file / DB (read-only)</span></div>
+    <div class="a">➜</div>
+    <div class="b">Mr. Milk connector<span>fetch + field mapping + dedupe</span></div>
+    <div class="a">➜</div>
+    <div class="b">Dashboards &amp; AI<span>auto-updated daily</span></div>
+  </div>
+  <p style="color:#42607f;font-size:14px;margin-top:12px">The connector pulls only <b>new</b> data since the last update, maps MilkMaster’s field names to ours, and feeds the existing import pipeline (which already handles de-duplication). The manual upload stays as a backup.</p>
+
+  <!-- ===== SECURITY ===== -->
+  <h2 class="sec">7 &nbsp;Security &amp; ownership</h2>
+  <div class="grid safe">
+    <div class="s"><b>Read-only.</b> We only read data — never write to MilkMaster.</div>
+    <div class="s"><b>Private credentials.</b> Keys live server-side, never in the app or shared.</div>
+    <div class="s"><b>Revocable.</b> MilkMaster can disable access at any time.</div>
+    <div class="s"><b>Your data stays yours.</b> It flows into Mr. Milk’s own systems; the AI runs on our backend.</div>
+  </div>
+
+  <!-- ===== TIMELINE ===== -->
+  <h2 class="sec">8 &nbsp;Next steps &amp; timeline</h2>
+  <table>
+    <tr><th>Step</th><th>Owner</th><th>Time</th></tr>
+    <tr><td>Choose a connection option &amp; share details (key / feed / access)</td><td>MilkMaster</td><td>This week</td></tr>
+    <tr><td>Build the connector + field mapping</td><td>Mr. Milk</td><td>1–2 days</td></tr>
+    <tr><td>“Sync now” + nightly auto-sync</td><td>Mr. Milk</td><td>~1 day</td></tr>
+    <tr><td>Test on sandbox, verify totals match</td><td>Both</td><td>1 day</td></tr>
+    <tr><td>Go live — auto-updating dashboards</td><td>—</td><td>—</td></tr>
+  </table>
+  <div class="next" style="margin-top:14px"><b>The ask for today:</b> agree on <b>one</b> connection method (API key or automatic file feed preferred) and identify MilkMaster’s technical contact. Everything else is already built and ready.</div>
+
+  <footer>Mr. Milk AI OS • Mittal Dairy Farms — Integration Brief for the MilkMaster meeting. All figures computed from live MilkMaster sales data.</footer>
+</div>
+</body></html>

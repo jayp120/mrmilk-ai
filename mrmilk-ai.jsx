@@ -9,6 +9,7 @@ import { GraphicComponent, GridComponent, LegendComponent, TooltipComponent, Vis
 import { CanvasRenderer } from "echarts/renderers";
 import { captureChatAudit } from "./mrmilk-chat-audit.js";
 import ContentStudio from "./src/ContentStudio.jsx";
+import DailyProductSales from "./src/components/DailyProductSales.jsx";
 import ImportCenter from "./src/ImportCenter.jsx";
 import { fetchChatNotebook, fetchCustomerRecords, fetchCustomerSummary, fetchImportHistory, proxyChat, streamChatNotebook } from "./src/utils/importApi.js";
 import NotebookAnswer from "./src/chat/NotebookAnswer.jsx";
@@ -457,6 +458,7 @@ const clampConfidence = (value) => {
 
 function normalizeCustomerRecord(row = {}) {
   const mapped = {
+    customer_id: toText(row.customer_id || row.source_customer_id || row["Customer ID"] || row["Customer Id"] || row.CustomerID),
     name: toText(row.name || row.Name),
     mobile: toText(row.mobile || row.Mobile),
     area: toText(row.area || row.Area),
@@ -851,7 +853,7 @@ function buildDatasetCitations(data, dataSource, customerRows = []) {
     citations.push({
       type: "customer_row",
       source: dataSource || "Uploaded workbook",
-      reference: `${customer.name} | ${customer.mobile} | ${customer.area}`,
+      reference: `${customer.name} | ${maskMobile(customer.mobile)} | ${customer.area}`,
       note: `status=${customer.status || "Unknown"}, revenue=${customer.revenue}, wallet=${customer.wallet_balance}, orders=${customer.orders}${toText(customer.note) ? `, sales_note=${summarizeCustomerNote(customer.note, 60)}` : ""}`,
       accessed_at: accessedAt
     });
@@ -1227,7 +1229,7 @@ const inferResearchAnswer = (parsed, customerRows = []) => {
   const leadIssue = asArray(parsed.root_cause)[0];
   const leadCustomer = customerRows[0];
   const issueText = toText(leadIssue?.issue || leadIssue?.impact || "The dataset shows an immediate retention and revenue leak.");
-  const customerText = leadCustomer?.name ? `Priority proof customer: ${leadCustomer.name} (${leadCustomer.mobile}) in ${leadCustomer.area}.` : "";
+  const customerText = leadCustomer?.name ? `Priority proof customer: ${leadCustomer.name} (${maskMobile(leadCustomer.mobile)}) in ${leadCustomer.area}.` : "";
   const actionText = toText(leadAction?.action || leadAction?.expected_outcome || "Act on the top flagged customers first.");
   return [issueText, customerText, actionText].filter(Boolean).join(" ");
 };
@@ -1552,11 +1554,11 @@ const structuredToMarkdown = (s) => {
       md.push("| **Name** | **Mobile** | **Area** | **Status** | **Revenue** | **Wallet** | **Orders** | **Note** | **Why It Matters** |");
       md.push("|---|---|---|---|---|---|---|---|---|");
       previewRows.forEach((customer) => {
-        md.push(`| ${toText(customer?.name)} | ${toText(customer?.mobile)} | ${toText(customer?.area)} | ${toText(customer?.status)} | ${toInt(customer?.revenue).toLocaleString()} | ${toInt(customer?.wallet_balance).toLocaleString()} | ${toInt(customer?.orders).toLocaleString()} | ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)} |`);
+        md.push(`| ${toText(customer?.name)} | ${maskMobile(toText(customer?.mobile))} | ${toText(customer?.area)} | ${toText(customer?.status)} | ${toInt(customer?.revenue).toLocaleString()} | ${toInt(customer?.wallet_balance).toLocaleString()} | ${toInt(customer?.orders).toLocaleString()} | ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)} |`);
       });
     } else {
       previewRows.forEach((customer, index) => {
-        md.push(`${index + 1}. ${toText(customer?.name)} | ${toText(customer?.mobile)} | ${toText(customer?.area)} | ${toText(customer?.status)} | revenue ${toInt(customer?.revenue).toLocaleString()} | wallet ${toInt(customer?.wallet_balance).toLocaleString()} | note ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)}`);
+        md.push(`${index + 1}. ${toText(customer?.name)} | ${maskMobile(toText(customer?.mobile))} | ${toText(customer?.area)} | ${toText(customer?.status)} | revenue ${toInt(customer?.revenue).toLocaleString()} | wallet ${toInt(customer?.wallet_balance).toLocaleString()} | note ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)}`);
       });
       md.push(`- Open the full proof list to inspect all ${proofRows.length.toLocaleString()} matched customers.`);
     }
@@ -1687,8 +1689,11 @@ const structuredToMarkdown = (s) => {
 
 const customerListToPlainText = (rows = []) => {
   const sanitizePlainField = (value) => toText(value).replace(/\s+/g, " ");
-  const header = ["Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
+  // Customer ID first — same column order as the CSV export so clipboard
+  // paste -> Excel matches the downloaded file 1:1.
+  const header = ["Customer ID", "Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
   const lines = asArray(rows).map((customer) => [
+    sanitizePlainField(customer?.customer_id),
     sanitizePlainField(customer?.name),
     sanitizePlainField(customer?.mobile),
     sanitizePlainField(customer?.area),
@@ -2322,6 +2327,24 @@ const COLUMN_ALIASES = {
 };
 
 const toText = (value) => (value ?? "").toString().trim();
+
+// Mask a mobile/phone string for display. Format: 98****3210 (first 2 + last 4).
+// Mirrors backend/app/services/privacy.py:mask_mobile so display is consistent
+// across AI Chat answers and the dashboard customer-proof tables.
+// Pass-through for empty/non-mobile-shaped values so search/filter still works.
+const maskMobile = (value) => {
+  if (value === null || value === undefined) return value;
+  const s = String(value).trim();
+  if (!s) return s;
+  const digits = s.replace(/[^0-9]/g, "").replace(/0$/, (m, i, str) => (s.endsWith(".0") ? "" : m));
+  // Re-derive without losing the last digit if there was no .0 suffix
+  const clean = s.endsWith(".0") ? s.replace(/[^0-9]/g, "").slice(0, -1) : s.replace(/[^0-9]/g, "");
+  if (clean.length <= 6) return s;
+  const head = clean.slice(0, 2);
+  const tail = clean.slice(-4);
+  const middle = "*".repeat(Math.max(2, clean.length - 6));
+  return `${head}${middle}${tail}`;
+};
 const toNumber = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const text = toText(value).replace(/,/g, "");
@@ -3337,11 +3360,12 @@ const requestModelText = async ({ provider, model, apiKey, instructions, inputTe
   return { text: result.text, usedSearch: result.used_search || false };
 };
 
-export default function App() {
+export default function App({ authUser = null, onLogout = null } = {}) {
   const initialDatasetRef = useRef(null);
   if (!initialDatasetRef.current) initialDatasetRef.current = createInitialDatasetState();
+  const authRole = ROLES[authUser?.role] ? authUser.role : "owner";
   const [tab, setTab] = useState("dash");
-  const [role, setRole] = useState("owner");
+  const [role, setRole] = useState(authRole);
   const [msgs, setMsgs] = useState([]);
   const [inp, setInp] = useState("");
   const [chatControls, setChatControls] = useState(DEFAULT_CHAT_CONTROLS);
@@ -3441,6 +3465,7 @@ export default function App() {
   const [autoPinChat, setAutoPinChat] = useState(true);
   const deferredInput = useDeferredValue(inp);
   const rc = ROLES[role].color;
+  const visibleRoleKeys = authRole === "owner" ? Object.keys(ROLES) : [authRole];
 
   const isChatNearBottom = () => {
     const el = chatScrollRef.current;
@@ -3465,6 +3490,13 @@ export default function App() {
     setPendingClarification(null);
     setChatControls((prev) => ({ ...prev, persona: ROLE_DEFAULT_PERSONA[role] || prev.persona }));
   }, [role]);
+  useEffect(() => {
+    if (authRole !== "owner") {
+      setRole(authRole);
+    } else if (!ROLES[role]) {
+      setRole("owner");
+    }
+  }, [authRole, role]);
   useEffect(() => {
     if (!FREE_PROVIDER_OPTIONS.includes(provider)) setProvider("nvidia");
   }, [provider]);
@@ -4582,11 +4614,15 @@ export default function App() {
   };
   const exportProofCsv = (rows, label = "customer-proof") => {
     if (typeof window === "undefined") return;
-    const header = ["Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
+    // Customer ID first so the downloaded file's primary key is identifiable
+    // before the human-readable name. Mobile stays UNMASKED in downloads —
+    // that's the point of having "Export full CSV": ops needs to call them.
+    const header = ["Customer ID", "Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
     const escapeCsv = (value) => `"${toText(value).replace(/"/g, "\"\"")}"`;
     const csv = [
       header.join(","),
       ...asArray(rows).map((customer) => [
+        customer?.customer_id,
         customer?.name,
         customer?.mobile,
         customer?.area,
@@ -4888,6 +4924,16 @@ export default function App() {
   };
   const proofColumns = useMemo(() => [
     {
+      accessorKey: "customer_id",
+      header: ({ column }) => (
+        <button onClick={column.getToggleSortingHandler()} style={{background:"transparent",border:"none",padding:0,color:"inherit",cursor:"pointer",fontWeight:700}}>
+          Customer ID {column.getIsSorted() === "asc" ? "↑" : column.getIsSorted() === "desc" ? "↓" : ""}
+        </button>
+      ),
+      // MilkMaster source customer id — primary cross-reference for ops
+      cell: ({ row }) => <span style={{color:"#365a7f",fontFamily:"monospace",fontSize:11}}>{toText(row.original.customer_id) || "-"}</span>
+    },
+    {
       accessorKey: "name",
       header: ({ column }) => (
         <button onClick={column.getToggleSortingHandler()} style={{background:"transparent",border:"none",padding:0,color:"inherit",cursor:"pointer",fontWeight:700}}>
@@ -4899,7 +4945,9 @@ export default function App() {
     {
       accessorKey: "mobile",
       header: "Mobile",
-      cell: ({ row }) => <span style={{color:"#8b6914",fontFamily:"monospace"}}>{toText(row.original.mobile)}</span>
+      // Display masked. Raw mobile stays in row.original.mobile and is exported
+      // in "Export full CSV" / "Export visible CSV" so ops can still call.
+      cell: ({ row }) => <span style={{color:"#8b6914",fontFamily:"monospace"}}>{maskMobile(toText(row.original.mobile))}</span>
     },
     {
       accessorKey: "area",
@@ -5597,18 +5645,31 @@ export default function App() {
             <span title={BRAND_CONTEXT.meta} style={{background:"#07406912",border:"1px solid #a7c1db",borderRadius:20,padding:"2px 8px",color:"#074069",fontSize:9}}>Brand DNA synced from {BRAND_CONTEXT.source}</span>
           </div>
         </div>
-        <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
-          {Object.entries(ROLES).map(([k,r])=>(
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end",alignItems:"center"}}>
+          {authUser && (
+            <span title={`Signed in as ${authUser.username}`} style={{background:"#f4f9ff",border:"1px solid #c7d9ea",borderRadius:999,color:"#365a7f",padding:"5px 10px",fontSize:10,fontWeight:700}}>
+              {authUser.name || authUser.username} · {ROLES[authRole]?.label || authRole}
+            </span>
+          )}
+          {visibleRoleKeys.map((k)=>{
+            const r = ROLES[k];
+            return (
             <button key={k} onClick={()=>setRole(k)} style={{background:role===k?r.color+"20":"#ffffff",border:`1px solid ${role===k?r.color+"66":"#c7d7e8"}`,borderRadius:7,color:role===k?r.color:"#567796",padding:"4px 9px",cursor:"pointer",fontSize:10,fontFamily:"'Montserrat', sans-serif",fontWeight:600}}>
               {r.icon} {r.label}
             </button>
-          ))}
+            );
+          })}
+          {typeof onLogout === "function" && (
+            <button onClick={onLogout} style={{background:"#ffffff",border:"1px solid #e6c4bc",borderRadius:7,color:"#a14b39",padding:"4px 9px",cursor:"pointer",fontSize:10,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
+              Sign out
+            </button>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:"1px solid #c4daee",background:"#ffffff",flexShrink:0,position:"relative",zIndex:1}}>
-        {[{id:"dash",label:"Dashboard"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
+        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",borderBottom:`3px solid ${tab===t.id?rc:"transparent"}`,color:tab===t.id?rc:"#4d5b78",padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
             {t.label}
           </button>
@@ -5840,6 +5901,13 @@ export default function App() {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* DAILY SALES TAB */}
+      {tab==="sales" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <DailyProductSales />
         </div>
       )}
 

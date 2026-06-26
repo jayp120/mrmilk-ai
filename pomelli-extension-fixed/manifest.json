@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MrMilk AI × Pomelli Bridge",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Connects MrMilk AI Content Studio to Pomelli for on-brand campaign generation",
   "permissions": [
     "tabs",
@@ -13,7 +13,8 @@
   "host_permissions": [
     "https://labs.google.com/pomelli/*",
     "https://labs.google.com/*",
-    "http://localhost:3456/*"
+    "http://localhost:3456/*",
+    "http://192.168.101.216:3456/*"
   ],
   "background": {
     "service_worker": "background.js",

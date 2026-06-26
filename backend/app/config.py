@@ -42,6 +42,10 @@ class Settings(BaseSettings):
 
     allow_local_file_fallback: bool = Field(default=True, alias="ALLOW_LOCAL_FILE_FALLBACK")
     upload_allowed_roles_raw: str = Field(default="owner,ops", alias="UPLOAD_ALLOWED_ROLES")
+    auth_enabled: bool = Field(default=False, alias="AUTH_ENABLED")
+    auth_token_secret: str | None = Field(default=None, alias="AUTH_TOKEN_SECRET")
+    auth_token_ttl_minutes: int = Field(default=720, alias="AUTH_TOKEN_TTL_MINUTES")
+    auth_users_json: str = Field(default="", alias="AUTH_USERS_JSON")
 
     @property
     def db_configured(self) -> bool:

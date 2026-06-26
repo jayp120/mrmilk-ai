@@ -13,7 +13,7 @@ This module exposes **two** public entry points:
 
 Event types yielded by `stream_agent`:
   plan           → model is about to pick a tool or compose an answer
-  model          → {"model": "gemini-2.5-pro"} (re-emitted when fallback kicks in)
+  model          → {"model": "gemini-3.5-flash"} (re-emitted when fallback kicks in)
   tool_call      → {"name": "area_stats", "args": {...}}
   tool_done      → {"name": "area_stats", "summary": "12 rows", "duration_ms": 340}
   retry          → schema validation failed, asking Gemini to fix JSON
@@ -36,19 +36,30 @@ from pydantic import ValidationError
 
 from ..config import get_settings
 from . import ai_tools
+from . import duckdb_engine
+from . import data_dictionary
+from . import query_memory
+from . import validator as _validator
+from . import report_builder
+from . import privacy
 from .ai_schema import (
     BLOCK_SCHEMA_HINT,
     ImageBlock,
     NotebookMeta,
     NotebookResponse,
+    ReportBlock,
     TextBlock,
 )
 
 logger = logging.getLogger(__name__)
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-DEFAULT_MODEL = "gemini-2.5-pro"
-FALLBACK_MODELS: list[str] = []  # Pro-only by user choice — fail loud on throttle, no silent flash downgrade.
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
+# 3.1 Flash-Lite (stable) for cost + speed on routine queries.
+# Falls back to Gemini 3.5 Flash (stable) — Google's most capable Flash model,
+# strong on agentic / tool-chain tasks — then to 2.5 Pro as a final safety net,
+# if Lite produces malformed JSON or fails the 10-hop agentic pattern.
+FALLBACK_MODELS: list[str] = ["gemini-3.5-flash", "gemini-2.5-pro"]
 MAX_TOOL_HOPS = 10
 HTTP_TIMEOUT = 90.0
 
@@ -161,11 +172,52 @@ TOOL_DECLARATIONS = [
             "Fast read-only SELECT against the Supabase customer_records table "
             "(20,612 rows). Use for sub-second customer aggregates (counts by status, "
             "area, hub, wallet buckets) when you don't need sales data. Single statement, "
-            "LIMIT capped. For anything that involves sales history, use run_python instead."
+            "LIMIT capped. For anything that involves sales history, use run_duckdb_sql or run_python."
         ),
         "parameters": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "Single SELECT statement."}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "run_duckdb_sql",
+        "description": (
+            "PREFERRED for analytical SQL. Sub-second DuckDB queries over the live "
+            "customer_records snapshot AND the full 361,094-row sales dataset, joined "
+            "on `mobile`.\n\n"
+            "AVAILABLE VIEWS:\n"
+            "  customers          — current customer master snapshot (id, customer_id, mobile,\n"
+            "                       name, area, hub, subscription_status, total_revenue,\n"
+            "                       total_orders, wallet_balance, effective_wallet_balance,\n"
+            "                       last_delivery_date, source, payment_mode, …)\n"
+            "                       NOTE: `customer_id` is the MilkMaster source ID — ALWAYS include\n"
+            "                       it as the first column in any customer-listing table so the\n"
+            "                       downloaded CSV / PDF report shows the canonical key.\n"
+            "  sales              — every sales transaction line item (date, invoice_id, mobile,\n"
+            "                       customer_id, product_name, qty_net, sub_total, delivery_status,\n"
+            "                       area, hub, …)\n"
+            "  sales_delivered    — sales filtered to delivery_status='delivered'\n\n"
+            "Use this INSTEAD of run_python for anything expressible as SQL:\n"
+            "  • product / area / hub aggregates\n"
+            "  • date-bucketed time series\n"
+            "  • simple JOINs between customers and sales on mobile\n"
+            "  • top-N / bottom-N rankings\n"
+            "  • COUNT(DISTINCT ...) for unique-customer counts\n\n"
+            "Reserve run_python for things SQL can't do: ML, matplotlib charts, statistical tests,\n"
+            "complex cohorts, percentile windows.\n\n"
+            "Single SELECT/WITH statement only. Mutations / DDL are blocked. Auto LIMIT 20000.\n\n"
+            "EXAMPLE (note `customer_id` as the first column — required for ops downloads):\n"
+            "  SELECT c.customer_id, c.name, c.mobile, c.area, c.subscription_status,\n"
+            "         COUNT(DISTINCT s.invoice_id) AS orders, SUM(s.sub_total) AS revenue\n"
+            "  FROM sales_delivered s JOIN customers c ON c.mobile = s.mobile\n"
+            "  WHERE LOWER(s.product_name) LIKE '%mango%'\n"
+            "  GROUP BY c.customer_id, c.name, c.mobile, c.area, c.subscription_status\n"
+            "  ORDER BY revenue DESC"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Single SELECT or WITH statement."}},
             "required": ["query"],
         },
     },
@@ -214,6 +266,7 @@ TOOL_DECLARATIONS = [
 TOOL_DISPATCH = {
     "run_python": ai_tools.run_python,
     "run_safe_sql": ai_tools.run_safe_sql,
+    "run_duckdb_sql": duckdb_engine.run_duckdb_sql,
     "lookup_customer": ai_tools.lookup_customer,
     "find_match": ai_tools.find_match,
 }
@@ -229,10 +282,17 @@ Ethics (non-negotiable):
 - Retention is service-led: wallet guidance, restart scheduling, premium reassurance.
 
 YOUR APPROACH — DYNAMIC, DEEPNOTE-STYLE:
-For ANY analytical question the user asks, the default and correct move is:
-  1. Call `run_python` with pandas code that answers the question using df + sales_df.
-  2. Print the answer (numbers, tables, chart data) to stdout.
-  3. Compose the structured-block JSON response from what your Python printed.
+For ANY analytical question the user asks:
+  1. PREFERRED: Call `run_duckdb_sql` with a single SELECT/WITH query against the
+     `customers`, `sales`, and `sales_delivered` views. Sub-second answers, joins
+     on `mobile` are first-class, no sandbox cold-start.
+  2. ESCAPE HATCH: Call `run_python` when the question genuinely needs Python —
+     ML (sklearn, statsmodels), matplotlib, statistical tests, cohort math,
+     percentile windows, anything DuckDB SQL can't express cleanly.
+  3. Print the answer (numbers, tables, chart data) to stdout / return as rows.
+  4. Compose the structured-block JSON response from what your tool returned.
+
+When in doubt, try DuckDB first — it's faster and less error-prone.
 
 This is how Deepnote feels — the AI writes and executes live code for every question. No bounded menu of canned functions.
 
@@ -263,8 +323,16 @@ before you compose the final JSON. If any check fails, re-run with a fix; do not
   8. STATUS FIELD — Use the exact MilkMaster labels from KNOWN VALUES verbatim. "active" alone
      is ambiguous (could mean Active Subscription OR Active No Subscription) — ask the user
      which they meant if it's not specified, or report both.
-  9. EMPTY-RESULT HONESTY — If the filtered set is empty, say so plainly. Never paper over
-     a zero with a generic answer.
+  9. EMPTY-RESULT VERIFICATION — Never declare a product, customer, area, or category
+     "absent from the data" without first running run_python with a substring check on the
+     real DataFrame. find_match's low-confidence is NOT proof of absence — it's a clustering
+     miss on the embedding model. Before saying "no X in the data" you MUST have stdout from
+     a run_python call like:
+       hits = sales_df[sales_df['product_name'].str.contains(query, case=False, na=False)]
+       print(f'EMPTY_CHECK: {query!r} -> {len(hits)} rows, products={hits["product_name"].unique().tolist()}')
+     Only an explicit zero from this check is acceptable proof. If the query is empty for real,
+     say so plainly and tell the user what *is* in the data. Never paper over a zero with a
+     generic answer.
  10. NO PRE-SUMMARISATION — Print all rows the user asked for (top 50 = 50 records in stdout).
      The frontend table previews 10; the backend rehydrates from your stdout. If you only print
      10, the user gets 10 even when they asked for 50.
@@ -274,10 +342,13 @@ When to use the other tools:
   for a product, area, hub, or status that isn't already an exact match in KNOWN VALUES below.
   Examples: 'ghee 1L', 'wakkad', 'kothrood', 'milk', 'city hub'. find_match returns the
   canonical value with a confidence score. If top_score >= 0.78, treat the match as exact
-  and pass it to run_python verbatim. If lower, ask the user to clarify between the top 3.
-- `run_safe_sql` — only for simple customer-master aggregates where SQL is tangibly faster
-  (e.g. "how many active subscriptions"). If the question touches sales / products /
-  time-series / joins, use run_python.
+  and pass it to run_duckdb_sql verbatim. If lower, ask the user to clarify between the top 3.
+- `run_duckdb_sql` — your primary analytical tool. Sub-second SQL over both customers and
+  sales together. Use for filters, aggregates, joins, time-bucketing, top-N. See its
+  description for the available views and an example.
+- `run_safe_sql` — Postgres SELECT directly against the customer master. Use only when you
+  specifically need Postgres semantics; otherwise prefer DuckDB.
+- `run_python` — escape hatch. ML, matplotlib, statistical tests, anything SQL can't do.
 - `lookup_customer` — only when the user names ONE specific customer by mobile or name.
 
 DATA YOU HAVE ACCESS TO:
@@ -387,13 +458,16 @@ ANSWER: blocks=[
   input(suggestions=["Show their purchase history", "Other suspended top-20 customers", "Pune City Hub at-risk customers"])
 ]
 
-Example G — empty result honest
-USER: "customers buying mango"
-TOOLS: find_match(query='mango', type='product') → low-confidence; run_python returns 0 rows
+Example G — empty result honest (only AFTER verifying via run_python — see Accuracy rule 9)
+USER: "customers buying lithium batteries"
+TOOLS: run_python verified: sales_df['product_name'].str.contains('battery|lithium', case=False).sum() == 0
 ANSWER: blocks=[
-  text("I checked and there are **no customers buying mango products** in the sales history. Mr. Milk's product line is Desi Cow A2 dairy: A2 Milk, Ghee (500ml/1000ml), Paneer, Dahi, Buttermilk. There's no mango category in the catalog."),
-  input(suggestions=["Show top dairy products by revenue", "List the full product catalog"])
+  text("I checked the full sales history and there are **no rows matching 'lithium batteries'** in the catalog. Mr. Milk sells dairy + seasonal produce — milk, ghee, paneer, dahi, buttermilk, and seasonal items like mangoes, papaya, amla. Batteries aren't a product line."),
+  input(suggestions=["Show full product catalog", "Top products by revenue"])
 ]
+Note: NEVER use this template for a query that hasn't been verified with run_python first.
+A query like "mango" looks empty to find_match (embedding noise) but has 303 real rows in
+sales_df. Always verify with `.str.contains()` before declaring empty.
 
 Example H — hub aggregate
 USER: "revenue by hub"
@@ -428,7 +502,7 @@ async def _gemini_call(model: str, api_key: str, contents: list[dict], system_in
         "tools": [{"functionDeclarations": TOOL_DECLARATIONS}],
         "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
         "generationConfig": {
-            "temperature": 0.2,
+            "temperature": 0.1,
             "maxOutputTokens": 8192,
             "responseMimeType": "text/plain",
         },
@@ -618,11 +692,11 @@ async def stream_agent(
     data_coverage = _safe_data_coverage(session)
     api_key = settings.gemini_api_key
     if not api_key:
-        yield {"event": "blocks", "data": _text_only_response(
+        yield {"event": "blocks", "data": _dump_and_mask(_text_only_response(
             "Gemini API key is not configured on the backend. Set GEMINI_API_KEY in backend/.env.",
             model=model or DEFAULT_MODEL,
             coverage=data_coverage,
-        ).model_dump()}
+        ))}
         yield {"event": "done", "data": None}
         return
 
@@ -636,11 +710,39 @@ async def stream_agent(
         schema_prompt_text, _ = _get_schema(session)
     except Exception:  # noqa: BLE001
         schema_prompt_text = ""
+
+    # Auto-generated data dictionary — comprehensive column-level profile.
+    # Lets the agent see dtypes, null %, ranges, top values, and business
+    # meaning for every column without having to ask.
+    try:
+        dict_payload = data_dictionary.build(session)
+        data_dict_text = data_dictionary.render_for_prompt(dict_payload) if dict_payload else ""
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ai_agent: data dictionary unavailable: %s", exc)
+        data_dict_text = ""
+
+    # Few-shot retrieval from past successful answers — the agent learns
+    # over time as logs accumulate.
+    snapshot_id_for_memory = data_coverage.get("snapshot_id") if isinstance(data_coverage, dict) else None
+    try:
+        memory_matches = query_memory.retrieve_similar(
+            session, question, snapshot_id=snapshot_id_for_memory, top_k=3,
+        )
+        memory_text = query_memory.render_for_prompt(memory_matches)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ai_agent: query memory unavailable: %s", exc)
+        memory_matches = []
+        memory_text = ""
+
     system_parts = [PERSONA_PROMPT]
+    if data_dict_text:
+        system_parts.append(data_dict_text)
     if schema_prompt_text:
         system_parts.append(schema_prompt_text)
     if data_coverage.get("prompt_text"):
         system_parts.append(str(data_coverage["prompt_text"]))
+    if memory_text:
+        system_parts.append(memory_text)
     system_instruction = "\n\n".join(system_parts)
 
     contents: list[dict] = []
@@ -650,7 +752,11 @@ async def stream_agent(
     contents.append({"role": "user", "parts": [{"text": question}]})
 
     tool_calls_made: list[str] = []
+    tool_log: list[dict[str, Any]] = []  # richer log: name + args + summary, used by validator + memory
     active_model = chosen_model
+    validator_attempted = False
+    validator_verdict_for_log = "unknown"
+    started_at = time.perf_counter()
 
     # Backstop for LLM row-truncation: whenever a bulk tool returns a sizeable
     # rows list, remember it here. After the final JSON is parsed, any table
@@ -670,19 +776,51 @@ async def stream_agent(
         last_err: Exception | None = None
         retryable = ("overloaded", "high demand", "429", "503",
                      "quota", "exceeded", "rate limit", "resource_exhausted")
+        # Network-level errors that justify an automatic retry on the SAME model
+        # before falling back. Transient TCP cuts (httpx.ReadError) shouldn't
+        # surface as a user-facing failure on the first try.
+        network_retry_attempts = 2
+        network_retry_delay = 1.5
+
         for candidate_model in [active_model, *[m for m in FALLBACK_MODELS if m != active_model]]:
-            try:
-                data = await _gemini_call(candidate_model, api_key, current_contents, system_instruction=system_instruction)
-                if candidate_model != active_model:
-                    active_model = candidate_model
-                return data, candidate_model
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc).lower()
-                if any(k in msg for k in retryable):
+            for attempt in range(network_retry_attempts):
+                try:
+                    data = await _gemini_call(candidate_model, api_key, current_contents, system_instruction=system_instruction)
+                    if candidate_model != active_model:
+                        active_model = candidate_model
+                    return data, candidate_model
+                except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError, httpx.PoolTimeout) as exc:
                     last_err = exc
-                    logger.warning("Model %s throttled (%s), trying next fallback", candidate_model, msg[:140])
-                    continue
-                raise
+                    if attempt < network_retry_attempts - 1:
+                        logger.warning(
+                            "Gemini network error on %s (%s) — retrying in %.1fs",
+                            candidate_model, exc.__class__.__name__, network_retry_delay,
+                        )
+                        await asyncio.sleep(network_retry_delay)
+                        continue
+                    # Out of retries on this model; let the loop try the next fallback model
+                    logger.warning(
+                        "Gemini network error on %s exhausted retries — trying fallback",
+                        candidate_model,
+                    )
+                    break
+                except httpx.ReadTimeout as exc:
+                    last_err = exc
+                    logger.warning("Gemini read timeout on %s — falling back", candidate_model)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    msg = str(exc).lower()
+                    if any(k in msg for k in retryable):
+                        last_err = exc
+                        logger.warning("Model %s throttled (%s), trying next fallback", candidate_model, msg[:140])
+                        break
+                    raise
+        # Surface a useful message, not an empty one — httpx.ReadError stringifies to ""
+        if last_err and not str(last_err):
+            raise RuntimeError(
+                f"network error reaching Gemini ({last_err.__class__.__name__}) — "
+                "the connection dropped mid-response. Please retry."
+            )
         raise last_err or RuntimeError("All Gemini models exhausted")
 
     yield {"event": "model", "data": {"model": active_model}}
@@ -694,17 +832,17 @@ async def stream_agent(
                 yield {"event": "model", "data": {"model": used_model, "reason": "fallback"}}
         except Exception as exc:
             logger.exception("Gemini call failed")
-            yield {"event": "blocks", "data": _text_only_response(
+            yield {"event": "blocks", "data": _dump_and_mask(_text_only_response(
                 f"Gemini error: {exc}", model=active_model, tool_calls=tool_calls_made, coverage=data_coverage,
-            ).model_dump()}
+            ))}
             yield {"event": "done", "data": None}
             return
 
         candidate = _extract_candidate(data)
         if not candidate:
-            yield {"event": "blocks", "data": _text_only_response(
+            yield {"event": "blocks", "data": _dump_and_mask(_text_only_response(
                 "Gemini returned no candidate.", model=active_model, tool_calls=tool_calls_made, coverage=data_coverage,
-            ).model_dump()}
+            ))}
             yield {"event": "done", "data": None}
             return
 
@@ -746,11 +884,17 @@ async def stream_agent(
                         last_python_png["png"] = png
                         last_python_png["title"] = "Python visualization"
 
+                tool_summary_text = _summarise_tool_result(name, result)
                 yield {"event": "tool_done", "data": {
                     "name": name,
-                    "summary": _summarise_tool_result(name, result),
+                    "summary": tool_summary_text,
                     "duration_ms": duration_ms,
                 }}
+                tool_log.append({
+                    "name": name,
+                    "args": args,
+                    "summary": tool_summary_text,
+                })
 
                 response_parts.append({
                     "functionResponse": {"name": name, "response": {"result": result}},
@@ -775,7 +919,53 @@ async def stream_agent(
                 )
                 _rehydrate_truncated_tables(nb, bulk_rows_cache)
                 _ensure_image_block(nb, last_python_png)
-                yield {"event": "blocks", "data": nb.model_dump()}
+                _materialize_report_pdfs(nb)
+
+                # ----------------------------------------------------------
+                # Validator/critic pass — second LLM call sanity-checks the
+                # answer. Runs once per agent run; if it flags an issue we
+                # ask Gemini to redo with the critique as feedback.
+                # ----------------------------------------------------------
+                if not validator_attempted and hop < MAX_TOOL_HOPS - 1:
+                    validator_attempted = True
+                    yield {"event": "plan", "data": "Running accuracy validator..."}
+                    blocks_dump = [b.model_dump() for b in nb.blocks]
+                    verdict = await _validator.critique(question, tool_log, blocks_dump)
+                    verdict_kind = verdict.get("verdict", "ok")
+                    if verdict_kind == "issue":
+                        reason = verdict.get("reason") or "validator flagged an issue"
+                        validator_verdict_for_log = "issue"
+                        yield {"event": "retry", "data": f"Validator flagged: {reason}. Re-running."}
+                        contents.append(candidate["content"] if candidate.get("content") else {"role": "model", "parts": [{"text": text_out}]})
+                        contents.append({
+                            "role": "user",
+                            "parts": [{"text": (
+                                "ACCURACY CRITIC FOUND AN ISSUE — please redo the answer.\n"
+                                f"Issue: {reason}\n\n"
+                                "Re-run the appropriate tool (run_duckdb_sql or run_python) to verify "
+                                "against the live data, then emit a corrected JSON block response."
+                            )}],
+                        })
+                        continue  # back to the main agent loop
+                    validator_verdict_for_log = "ok"
+
+                # Persist to memory BEFORE masking so the internal audit trail
+                # keeps raw mobile numbers (ops needs them; the table is not
+                # exposed to end users).
+                _persist_to_memory(
+                    session=session,
+                    question=question,
+                    tool_log=tool_log,
+                    blocks=[b.model_dump() for b in nb.blocks],
+                    validator_verdict=validator_verdict_for_log,
+                    snapshot_id=snapshot_id_for_memory,
+                    model_used=active_model,
+                    duration_ms=int((time.perf_counter() - started_at) * 1000),
+                )
+                # Mask PII in the user-facing payload — every table/report/text
+                # block has its mobile/phone columns + free-text mentions
+                # rewritten from "9876543210" → "98****3210".
+                yield {"event": "blocks", "data": _dump_and_mask(nb)}
                 yield {"event": "done", "data": None}
                 return
             except ValidationError as exc:
@@ -791,20 +981,20 @@ async def stream_agent(
             continue
 
         # Give up: wrap text in a fallback block.
-        yield {"event": "blocks", "data": _text_only_response(
+        yield {"event": "blocks", "data": _dump_and_mask(_text_only_response(
             text_out or "No answer produced.",
             model=active_model,
             tool_calls=tool_calls_made,
             fallback=True,
             coverage=data_coverage,
-        ).model_dump()}
+        ))}
         yield {"event": "done", "data": None}
         return
 
-    yield {"event": "blocks", "data": _text_only_response(
+    yield {"event": "blocks", "data": _dump_and_mask(_text_only_response(
         "Agent exceeded tool hop limit without producing a final answer.",
         model=active_model, tool_calls=tool_calls_made, fallback=True, coverage=data_coverage,
-    ).model_dump()}
+    ))}
     yield {"event": "done", "data": None}
 
 
@@ -868,6 +1058,8 @@ def _rehydrate_truncated_tables(nb: NotebookResponse, bulk_cache: dict) -> None:
             return row_dict[normalized_keys[k]]
         # common aliases
         aliases = {
+            "customer_id": ["customer_id", "id", "source_customer_id", "milkmaster_id"],
+            "id": ["customer_id", "id", "source_customer_id"],
             "name": ["name", "customer_name"],
             "mobile": ["mobile", "phone"],
             "area": ["area"],
@@ -1015,6 +1207,87 @@ def _make_meta(
         tool_calls=tool_calls or [],
         fallback_used=fallback,
     )
+
+
+def _dump_and_mask(nb: NotebookResponse) -> dict[str, Any]:
+    """Serialise a NotebookResponse for the wire and mask PII in the same step.
+    Single entry point so no future code path can accidentally yield raw mobiles."""
+    payload = nb.model_dump()
+    try:
+        privacy.mask_blocks_in_place(payload.get("blocks") or [])
+    except Exception as exc:  # noqa: BLE001 — masking failure must NEVER block the answer
+        logger.warning("ai_agent: mask_blocks_in_place failed: %s", exc)
+    return payload
+
+
+def _materialize_report_pdfs(nb: NotebookResponse) -> None:
+    """Render any `report` block to a PDF on disk and back-fill `download_url`.
+    The agent emits the report's title + sections; we generate the PDF here so
+    the user can click through to download a polished doc.
+
+    PII masking is applied to the sections BEFORE rendering so the saved PDF
+    also has masked mobile numbers (matches what's shown in the UI). The
+    underlying parquet/Postgres still holds the raw numbers for CSV exports.
+    """
+    import copy
+    for block in nb.blocks:
+        if not isinstance(block, ReportBlock):
+            continue
+        if block.download_url:
+            continue  # already rendered (rare, but skip if so)
+        # Deep-copy + mask the sections so the in-memory ReportBlock that gets
+        # yielded later also has the masked version (the UI preview pane and
+        # the PDF stay in sync).
+        try:
+            masked_sections = copy.deepcopy(block.sections or [])
+            for section in masked_sections:
+                if isinstance(section, dict):
+                    table = section.get("table")
+                    if isinstance(table, dict):
+                        privacy._mask_table(table)
+                    body = section.get("body")
+                    if isinstance(body, str):
+                        section["body"] = privacy._mask_phone_in_text(body)
+            block.sections = masked_sections
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai_agent: PDF report PII mask failed: %s", exc)
+
+        try:
+            _, public = report_builder.render_report_pdf(
+                title=block.title or "Mr. Milk Report",
+                sections=block.sections or [],
+                template_key=block.template_key,
+            )
+            block.download_url = public
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai_agent: report render failed: %s", exc)
+
+
+def _persist_to_memory(
+    *,
+    session,
+    question: str,
+    tool_log: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    validator_verdict: str,
+    snapshot_id: str | None,
+    model_used: str,
+    duration_ms: int,
+) -> None:
+    """Best-effort logging of this run to query_memory. Silent on failure."""
+    try:
+        query_memory.log_run(
+            session,
+            question=question,
+            tool_calls=tool_log,
+            blocks=blocks,
+            validator_verdict=validator_verdict,
+            snapshot_id=snapshot_id,
+            model_used=model_used,
+            duration_ms=duration_ms,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ai_agent: query_memory log failed: %s", exc)
 
 
 def _text_only_response(

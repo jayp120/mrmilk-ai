@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mr. Milk × MilkMaster — Simple Plan</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#eef3f9;color:#1f3550;line-height:1.6}
+.page{max-width:820px;margin:0 auto;padding:0 20px 60px}
+.bar{display:flex;align-items:center;gap:10px;padding:12px 0;position:sticky;top:0;background:#eef3f9}
+.bar .sp{margin-left:auto}
+.print{background:#074069;color:#fff;border:none;border-radius:9px;padding:9px 16px;font-size:14px;font-weight:700;cursor:pointer}
+header{background:linear-gradient(135deg,#063a5f,#0a5688);color:#eaf3ff;border-radius:18px;padding:26px 28px;box-shadow:0 14px 32px rgba(7,64,105,.18)}
+header .eyebrow{color:#ffe6b8;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700}
+header h1{margin:8px 0 6px;font-size:26px}
+header p{margin:0;color:#cfe0f1;font-size:15px}
+h2{font-size:19px;color:#074069;margin:26px 2px 12px}
+.lead{font-size:18px;background:#fff;border:1px solid #d7e3f0;border-left:5px solid #d2ab67;border-radius:12px;padding:16px 18px;margin-top:16px}
+.lead b{color:#074069}
+.flow{display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:center;margin-top:8px}
+.flow .box{background:#fff;border:1px solid #d7e3f0;border-radius:14px;padding:16px;text-align:center;box-shadow:0 8px 20px rgba(7,64,105,.05)}
+.flow .box .big{font-size:30px}
+.flow .box .t{font-weight:800;color:#1f3550;margin-top:6px}
+.flow .box .s{color:#6f86aa;font-size:13px}
+.flow .arrow{font-size:30px;color:#d2ab67;text-align:center}
+.cards{display:grid;grid-template-columns:1fr;gap:12px}
+.card{background:#fff;border:1px solid #d7e3f0;border-radius:14px;padding:16px 18px;box-shadow:0 8px 20px rgba(7,64,105,.05);display:flex;gap:14px;align-items:flex-start}
+.card .n{flex:none;width:34px;height:34px;border-radius:50%;background:#074069;color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:16px}
+.card .best{background:#2f7a4f}
+.card h3{margin:0 0 4px;font-size:16px;color:#1f3550}
+.card p{margin:0;color:#42607f;font-size:14px}
+.tag{display:inline-block;font-size:11px;font-weight:700;border-radius:999px;padding:2px 9px;margin-left:6px;vertical-align:middle}
+.tag.best{background:#e6f4ec;color:#2f7a4f}.tag.easy{background:#fff4dc;color:#a07b2d}
+.qbox{background:#fffdf7;border:1px solid #ead4ab;border-radius:12px;padding:14px 18px}
+.qbox ol{margin:6px 0 0;padding-left:20px}.qbox li{margin-bottom:8px;font-size:15px;color:#5a4416}
+.pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.pill{background:#fff;border:1px solid #c7d9ea;border-radius:999px;padding:6px 13px;font-size:13.5px;color:#33506f;font-weight:600}
+.safe{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.safe .s{background:#fff;border:1px solid #d7e3f0;border-radius:12px;padding:14px 16px;font-size:14px}
+.safe .s b{color:#2f7a4f}
+.next{background:#074069;color:#eaf3ff;border-radius:14px;padding:18px 20px;font-size:15px;margin-top:8px}
+.next b{color:#ffe6b8}
+footer{color:#6f86aa;font-size:12.5px;text-align:center;margin-top:26px}
+@media print{
+  body{background:#fff}.bar{display:none}
+  header,.card,.lead,.flow .box,.safe .s,.next,.qbox{box-shadow:none}
+  h2{margin-top:18px}
+}
+</style></head><body>
+<div class="page">
+  <div class="bar"><span class="sp"></span><button class="print" onclick="window.print()">🖨️ Print / Save as PDF</button></div>
+
+  <header>
+    <div class="eyebrow">Mittal Dairy Farms • Mr. Milk AI</div>
+    <h1>Connecting Mr. Milk with MilkMaster</h1>
+    <p>A simple guide — what we want, and what we need from MilkMaster. Prepared for Aniket.</p>
+  </header>
+
+  <div class="lead">
+    <b>What we want, in one line:</b> our daily sales data from MilkMaster should flow into the Mr. Milk app <b>automatically</b> — so nobody has to download and upload files by hand.
+  </div>
+
+  <h2>The simple idea</h2>
+  <div class="flow">
+    <div class="box"><div class="big">📄→📤</div><div class="t">Today</div><div class="s">Someone exports a file and uploads it by hand, every time.</div></div>
+    <div class="arrow">➜</div>
+    <div class="box"><div class="big">🔑🤖</div><div class="t">After we connect</div><div class="s">The app fetches the new data on its own, every day.</div></div>
+  </div>
+  <p style="color:#42607f;font-size:14.5px;margin-top:12px">Think of it like giving the app a <b>key</b> to read the data, so a little robot can collect the new sales each night — no manual work, never out of date.</p>
+
+  <h2>What we’re asking MilkMaster for</h2>
+  <p style="margin-top:0;color:#42607f">We <b>don’t need to know your technology or database.</b> Any <b>one</b> of these three works — please pick whichever is easiest for you:</p>
+  <div class="cards">
+    <div class="card"><div class="n best">1</div><div><h3>An API key <span class="tag best">BEST</span></h3><p>A secure, read-only “password” that lets our app pull the sales data directly. Fully automatic and always fresh.</p></div></div>
+    <div class="card"><div class="n">2</div><div><h3>A daily auto-export file <span class="tag easy">EASIEST</span></h3><p>MilkMaster automatically drops a daily sales file (CSV/Excel) into a folder, Google Drive, or email — and our app picks it up by itself.</p></div></div>
+    <div class="card"><div class="n">3</div><div><h3>Read-only access to the data</h3><p>Only if the first two aren’t possible — a read-only view of the sales records. (This is the only option where your database type matters.)</p></div></div>
+  </div>
+
+  <h2>The few questions to ask in the meeting</h2>
+  <div class="qbox"><ol>
+    <li>Do you have an <b>API</b> we can connect to? If yes, please share the link and a <b>read-only key</b>.</li>
+    <li>If not — can you <b>auto-send a daily sales file</b> to a folder, Google Drive, or email?</li>
+    <li>Can you give us the <b>sales / delivery history</b> with a <b>date filter</b> (so we only pull new days)?</li>
+    <li>Can you share <b>one sample</b> of the data so we can confirm the columns?</li>
+  </ol></div>
+
+  <h2>What data we need (the basics)</h2>
+  <div class="pills">
+    <span class="pill">Date</span><span class="pill">Customer (phone / id)</span><span class="pill">Product &amp; pack size</span>
+    <span class="pill">Quantity</span><span class="pill">Amount (₹)</span><span class="pill">Delivered / cancelled</span>
+    <span class="pill">Hub / area</span><span class="pill">Invoice id</span>
+  </div>
+
+  <h2>Is it safe?</h2>
+  <div class="safe">
+    <div class="s"><b>Read-only.</b> We only read the data — we never change anything in MilkMaster.</div>
+    <div class="s"><b>Private key.</b> The key stays on our server, never shared or shown in the app.</div>
+    <div class="s"><b>You stay in control.</b> MilkMaster can switch off the access anytime.</div>
+  </div>
+
+  <h2>What happens after</h2>
+  <div class="next">Once we have a key or a file feed, we connect it in a <b>few days</b>. After that, every morning the app already shows <b>yesterday’s sales</b> — dashboards and reports update by themselves, with <b>zero manual uploads</b>.</div>
+
+  <footer>Mr. Milk AI OS • Mittal Dairy Farms — simple integration guide. To save as PDF: click “Print / Save as PDF”, then choose “Save as PDF”.</footer>
+</div>
+</body></html>

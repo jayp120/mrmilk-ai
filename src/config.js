@@ -1,7 +1,15 @@
+const currentHost =
+  typeof window !== "undefined" && window.location?.hostname
+    ? window.location.hostname
+    : "localhost";
+
 export const CONFIG = {
-  BRIDGE_URL: "http://localhost:3456",
+  BRIDGE_URL: `http://${currentHost}:3456`,
   POMELLI_URL: "https://labs.google.com/pomelli",
-  APP_URL: "http://localhost:5173",
+  APP_URL:
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin
+      : "http://localhost:5173",
   BRAND: {
     name: "Mr. Milk",
     company: "Mittal Dairy Farms",

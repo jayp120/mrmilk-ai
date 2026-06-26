@@ -4,6 +4,7 @@ import { validate as uuidValidate } from "uuid";
 
 const app = express();
 const PORT = 3456;
+const HOST = "0.0.0.0";
 const MAX_JOBS = 50;
 const store = new Map();
 const jobOrder = [];
@@ -19,7 +20,12 @@ const log = (icon, message, extra) => {
 const isLocalWebOrigin = (origin) => {
   try {
     const parsed = new URL(origin);
-    const allowedHost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+    const allowedHost =
+      parsed.hostname === "localhost" ||
+      parsed.hostname === "127.0.0.1" ||
+      /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
+      /^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname) ||
+      /^192\.168\.\d{1,3}\.\d{1,3}$/.test(parsed.hostname);
     const allowedProtocol = parsed.protocol === "http:" || parsed.protocol === "https:";
     return allowedHost && allowedProtocol;
   } catch {
@@ -213,7 +219,7 @@ app.delete("/jobs", (_req, res) => {
   res.json({ cleared: true, count });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, HOST, () => {
   log("🟢", `started on http://localhost:${PORT}`);
 });
 

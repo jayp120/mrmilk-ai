@@ -20,6 +20,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import * as echarts from "echarts/core";
+import { downloadProtectedFile } from "../utils/importApi.js";
 
 // ----------------------------------------------------------------------
 // Shared helpers
@@ -446,6 +447,181 @@ function ImageBlock({ block }) {
 
 
 // ----------------------------------------------------------------------
+// VegaLiteBlock — interactive Vega-Lite chart, lazy-loaded from CDN.
+// We avoid a npm dependency to keep the bundle small; vega-embed pulls
+// vega + vega-lite together in one ~500KB script that's cached after
+// first load.
+// ----------------------------------------------------------------------
+const VEGA_EMBED_URL = "https://cdn.jsdelivr.net/npm/vega-embed@6";
+let _vegaEmbedLoading = null;
+function loadVegaEmbed() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.vegaEmbed) return Promise.resolve(window.vegaEmbed);
+  if (_vegaEmbedLoading) return _vegaEmbedLoading;
+  _vegaEmbedLoading = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = VEGA_EMBED_URL;
+    s.async = true;
+    s.onload = () => resolve(window.vegaEmbed);
+    s.onerror = () => reject(new Error("vega-embed failed to load"));
+    document.head.appendChild(s);
+  });
+  return _vegaEmbedLoading;
+}
+
+function VegaLiteBlock({ block }) {
+  const ref = useRef(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (!ref.current || !block?.spec) return;
+    let cancelled = false;
+    loadVegaEmbed()
+      .then((embed) => {
+        if (cancelled || !ref.current) return;
+        embed(ref.current, block.spec, { actions: { export: true, source: false, compiled: false, editor: false } })
+          .catch((err) => { if (!cancelled) setError(String(err?.message || err)); });
+      })
+      .catch((err) => { if (!cancelled) setError(String(err?.message || err)); });
+    return () => { cancelled = true; };
+  }, [block]);
+  return (
+    <div style={{ ...CARD_BASE, borderLeft: "4px solid #d2ab67" }}>
+      {block.title && <div style={{ ...LABEL, color: "#8b6914", marginBottom: 8 }}>{block.title}</div>}
+      {error
+        ? <div style={{ color: "#b94a4a", fontSize: 11 }}>Vega-Lite render error: {error}</div>
+        : <div ref={ref} style={{ width: "100%", minHeight: 320 }} />}
+      {block.caption && <div style={{ color: "#6f86aa", fontSize: 11, marginTop: 8 }}>{block.caption}</div>}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
+// PlotlyBlock — interactive Plotly figure, lazy-loaded from CDN.
+// ----------------------------------------------------------------------
+const PLOTLY_URL = "https://cdn.jsdelivr.net/npm/plotly.js-basic-dist@2/plotly-basic.min.js";
+let _plotlyLoading = null;
+function loadPlotly() {
+  if (typeof window === "undefined") return Promise.reject(new Error("no window"));
+  if (window.Plotly) return Promise.resolve(window.Plotly);
+  if (_plotlyLoading) return _plotlyLoading;
+  _plotlyLoading = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = PLOTLY_URL;
+    s.async = true;
+    s.onload = () => resolve(window.Plotly);
+    s.onerror = () => reject(new Error("plotly failed to load"));
+    document.head.appendChild(s);
+  });
+  return _plotlyLoading;
+}
+
+function PlotlyBlock({ block }) {
+  const ref = useRef(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    if (!ref.current || !block?.figure) return;
+    let cancelled = false;
+    loadPlotly()
+      .then((Plotly) => {
+        if (cancelled || !ref.current) return;
+        try {
+          Plotly.newPlot(ref.current, block.figure.data || [], block.figure.layout || {}, { displaylogo: false, responsive: true });
+        } catch (err) {
+          setError(String(err?.message || err));
+        }
+      })
+      .catch((err) => { if (!cancelled) setError(String(err?.message || err)); });
+    return () => {
+      try { window.Plotly && window.Plotly.purge(ref.current); } catch (_) {}
+    };
+  }, [block]);
+  return (
+    <div style={{ ...CARD_BASE, borderLeft: "4px solid #1f6fb4" }}>
+      {block.title && <div style={{ ...LABEL, color: "#1f4d7a", marginBottom: 8 }}>{block.title}</div>}
+      {error
+        ? <div style={{ color: "#b94a4a", fontSize: 11 }}>Plotly render error: {error}</div>
+        : <div ref={ref} style={{ width: "100%", minHeight: 360 }} />}
+      {block.caption && <div style={{ color: "#6f86aa", fontSize: 11, marginTop: 8 }}>{block.caption}</div>}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
+// ReportBlock — polished multi-section report with PDF download.
+// Inline preview shows the first ~3 sections; full doc is the PDF.
+// ----------------------------------------------------------------------
+function ReportBlock({ block }) {
+  const sections = Array.isArray(block.sections) ? block.sections : [];
+  const previewLimit = 3;
+  const [downloadError, setDownloadError] = useState("");
+  const handleDownload = async () => {
+    if (!block.download_url) return;
+    setDownloadError("");
+    try {
+      const filename = block.download_url.split("/").pop() || `${block.title || "report"}.pdf`;
+      await downloadProtectedFile(block.download_url, filename);
+    } catch (err) {
+      setDownloadError(err?.message || "Download failed.");
+    }
+  };
+  return (
+    <div style={{ ...CARD_BASE, borderLeft: "4px solid #7B3F00", background: "#FAF7F2" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+        <div>
+          <div style={{ ...LABEL, color: "#7B3F00" }}>Report{block.template_key ? ` · ${block.template_key.replace(/_/g, " ")}` : ""}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#3F3F44", marginTop: 2 }}>{block.title}</div>
+        </div>
+        {block.download_url && (
+          <button
+            type="button"
+            onClick={handleDownload}
+            style={{
+              flex: "0 0 auto",
+              background: "#7B3F00",
+              color: "#fff",
+              border: "none",
+              borderRadius: 18,
+              padding: "8px 14px",
+              fontSize: 11,
+              fontWeight: 700,
+              fontFamily: "'Montserrat', sans-serif",
+              boxShadow: "0 6px 14px rgba(123,63,0,0.18)",
+              whiteSpace: "nowrap",
+              cursor: "pointer",
+            }}
+          >
+            Download PDF
+          </button>
+        )}
+      </div>
+      {downloadError && <div style={{ color: "#b94a4a", fontSize: 11, marginBottom: 8 }}>{downloadError}</div>}
+      {sections.slice(0, previewLimit).map((sec, i) => (
+        <div key={i} style={{ marginTop: 10, paddingTop: 10, borderTop: i === 0 ? "none" : "1px dashed #E1B07E" }}>
+          {sec.heading && <div style={{ fontSize: 12, fontWeight: 700, color: "#7B3F00", marginBottom: 4 }}>{sec.heading}</div>}
+          {sec.body && <div style={{ fontSize: 12.5, color: "#3F3F44", lineHeight: 1.55 }}>{renderMarkdown(sec.body)}</div>}
+          {Array.isArray(sec?.big_numbers) && sec.big_numbers.length > 0 && (
+            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              {sec.big_numbers.map((bn, j) => (
+                <div key={j} style={{ background: "#fff", border: "1px solid #E1B07E", borderRadius: 8, padding: "8px 12px", minWidth: 110 }}>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#7B3F00" }}>{bn.value}</div>
+                  {bn.title && <div style={{ fontSize: 9, color: "#8B6914", textTransform: "uppercase", letterSpacing: 0.5 }}>{bn.title}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {sections.length > previewLimit && (
+        <div style={{ marginTop: 10, fontSize: 11, color: "#8B6914" }}>
+          + {sections.length - previewLimit} more section{sections.length - previewLimit === 1 ? "" : "s"} in the PDF
+        </div>
+      )}
+      {block.caption && <div style={{ color: "#6f86aa", fontSize: 11, marginTop: 10 }}>{block.caption}</div>}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------
 // InputBlock — follow-up suggestion chips
 // ----------------------------------------------------------------------
 function InputBlock({ block, onSuggest }) {
@@ -856,6 +1032,9 @@ export default function NotebookAnswer({ blocks = [], meta = {}, events = [], st
           case "sql":        return <SqlBlock key={i} block={block} />;
           case "table":      return <TableBlock key={i} block={block} />;
           case "chart":      return <ChartBlock key={i} block={block} />;
+          case "vega_lite":  return <VegaLiteBlock key={i} block={block} />;
+          case "plotly":     return <PlotlyBlock key={i} block={block} />;
+          case "report":     return <ReportBlock key={i} block={block} />;
           case "image":      return <ImageBlock key={i} block={block} />;
           case "input":      return <InputBlock key={i} block={block} onSuggest={onSuggest} />;
           default:

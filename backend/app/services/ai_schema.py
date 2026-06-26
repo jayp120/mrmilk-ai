@@ -125,9 +125,44 @@ class ImageBlock(BaseModel):
     caption: str | None = None
 
 
+class VegaLiteBlock(BaseModel):
+    """Declarative Vega-Lite spec. Frontend renders interactively via vega-embed.
+    Use for any chart richer than the simple bar/line/pie ChartBlock — multi-series,
+    layered, faceted, with tooltips. Spec follows https://vega.github.io/vega-lite."""
+    type: Literal["vega_lite"] = "vega_lite"
+    title: str | None = None
+    spec: dict[str, Any] = Field(default_factory=dict)
+    caption: str | None = None
+
+
+class PlotlyBlock(BaseModel):
+    """Plotly figure as JSON ({"data": [...], "layout": {...}}).
+    Frontend renders via plotly.js. Use for interactive scatter / heatmap /
+    3D / candlestick where vega-lite is awkward."""
+    type: Literal["plotly"] = "plotly"
+    title: str | None = None
+    figure: dict[str, Any] = Field(default_factory=dict)
+    caption: str | None = None
+
+
+class ReportBlock(BaseModel):
+    """Polished multi-section report — frontend renders as a downloadable PDF
+    plus an inline preview. `download_url` is filled by the backend when the
+    PDF is generated server-side.
+
+    `template_key` lets the frontend pick a styled inline preview before the PDF
+    finishes rendering: weekly_business_review | area_deep_dive | trial_funnel_health."""
+    type: Literal["report"] = "report"
+    title: str
+    template_key: str | None = None
+    sections: list[dict[str, Any]] = Field(default_factory=list)  # [{"heading": str, "body": str, "table": {...}}]
+    download_url: str | None = None
+    caption: str | None = None
+
+
 # Discriminated union — Pydantic picks the right block by `type` field.
 Block = Annotated[
-    Union[TextBlock, BigNumberBlock, SqlBlock, TableBlock, ChartBlock, InputBlock, ImageBlock],
+    Union[TextBlock, BigNumberBlock, SqlBlock, TableBlock, ChartBlock, InputBlock, ImageBlock, VegaLiteBlock, PlotlyBlock, ReportBlock],
     Field(discriminator="type"),
 ]
 
@@ -167,6 +202,9 @@ Return a single JSON object with this exact shape:
     { "type": "sql", "title": "Query run", "query": "SELECT ...", "row_count": 10 },
     { "type": "table", "title": "Top 10", "columns": ["Name","Mobile","Revenue"], "rows": [["X","9..",1000],...] },
     { "type": "chart", "title": "Wallet mix", "variant": "bar", "x_label": "bucket", "y_label": "customers", "data": [{"name":"Positive","value":2598},{"name":"Zero","value":17212},{"name":"Negative","value":240}] },
+    { "type": "vega_lite", "title": "Monthly revenue (multi-series)", "spec": { "$schema": "https://vega.github.io/schema/vega-lite/v5.json", "data": {"values": [...]}, "mark": "line", "encoding": {"x": {...}, "y": {...}, "color": {...}} } },
+    { "type": "plotly", "title": "Customer scatter — revenue vs orders", "figure": {"data": [{"type":"scatter","x":[...],"y":[...]}], "layout": {"title":"..."}} },
+    { "type": "report", "title": "Weekly Business Review (W18 2026)", "template_key": "weekly_business_review", "sections": [{"heading": "Headlines", "body": "..."}, {"heading": "Top hubs", "table": {"columns":["Hub","Revenue"], "rows":[...]} }] },
     // IMAGE BLOCKS ARE AUTO-INJECTED when run_python uses matplotlib — you
     // do NOT need to emit an image block yourself. Never include base64 in
     // your JSON; it's huge and will truncate your response.
@@ -175,7 +213,10 @@ Return a single JSON object with this exact shape:
 }
 
 Rules:
-- `type` is always required and exact: "text" | "big_number" | "sql" | "table" | "chart" | "image" | "input".
+- `type` is always required and exact: "text" | "big_number" | "sql" | "table" | "chart" | "image" | "vega_lite" | "plotly" | "report" | "input".
+- For multi-series time series, layered charts, or anything richer than a flat bar/line/pie, prefer `vega_lite` — pass a complete Vega-Lite v5 spec in `spec`. The frontend renders interactively with tooltips, panning, and download.
+- For interactive scatter / heatmap / 3D / candlestick, use `plotly` with a Plotly JS figure JSON in `figure`.
+- When the user asks for a "report", "review", "weekly summary", "deep dive", "deck", "PDF", or similar polished long-form output, emit a `report` block. Pick `template_key` from: `weekly_business_review`, `area_deep_dive`, `trial_funnel_health`, or omit for a generic styled report. Each section has `{heading, body, table?, chart?, big_number?}`. The backend will render this to a PDF and back-fill `download_url`.
 - TABLE `rows` MUST be an array of arrays (list of lists) parallel to `columns`, NOT an array of objects. Example: `"columns": ["Name","Mobile"], "rows": [["Alice","99..."],["Bob","98..."]]`. Objects will be auto-coerced but you cost retries by emitting them.
 - Include a `big_number` block up front for any question that has a headline metric.
 - Include a `sql` block showing the exact query that produced the numbers (from run_safe_sql, or describe the tool call you made).

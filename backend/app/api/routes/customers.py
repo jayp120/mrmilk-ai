@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from ...auth import AuthUser, require_permission
 from ...config import get_settings
 from ...db import get_db_last_error, is_db_available, is_db_configured, session_scope
 from ...services.customer_analytics import (
@@ -30,7 +31,7 @@ def _allow_cache_fallback() -> bool:
 
 
 @router.get("/summary")
-def customer_summary() -> dict:
+def customer_summary(_actor: AuthUser = Depends(require_permission("customers:read"))) -> dict:
     """
     Returns aggregated business metrics from the live customer snapshot —
     the same shape as the hardcoded DATA object the workspace uses, but
@@ -54,7 +55,7 @@ def customer_summary() -> dict:
 
 
 @router.get("/records")
-def customer_records() -> dict:
+def customer_records(_actor: AuthUser = Depends(require_permission("customers:read"))) -> dict:
     """
     Returns the full customer record list from the live snapshot,
     normalised to the shape the workspace expects for client-side

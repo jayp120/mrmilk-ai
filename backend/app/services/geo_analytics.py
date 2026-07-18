@@ -174,6 +174,7 @@ def heatmap_points(
     hub: str | None = None,
     status: str = "delivered",
     window_days: int = DEFAULT_WINDOW_DAYS,
+    product: str | None = None,
 ) -> dict[str, Any] | None:
     """Aggregate delivery coordinates into map points for the heat layer.
 
@@ -203,8 +204,34 @@ def heatmap_points(
     end_ts = min(end_ts, date_max_all)
 
     win = df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].copy()
+
+    # Product list is built from the WINDOW BEFORE the product filter is
+    # applied — otherwise selecting a product would collapse the dropdown to
+    # just that one and strand the user with no way back.
+    products_in_window: list[dict[str, Any]] = []
+    if "product_name" in win.columns:
+        pw = win[win["delivery_status"].str.lower() == status.lower()] if status != "all" else win
+        pg = (
+            pw.groupby("product_name")
+            .agg(revenue=("sub_total", "sum"), lines=("sub_total", "size"))
+            .sort_values("revenue", ascending=False)
+        )
+        total_rev = float(pg["revenue"].sum()) or 1.0
+        products_in_window = [
+            {
+                "product_name": str(name),
+                "revenue": round(float(r.revenue), 2),
+                "lines": int(r.lines),
+                "share_pct": round(100 * float(r.revenue) / total_rev, 2),
+            }
+            for name, r in pg.iterrows()
+            if str(name).strip()
+        ]
+
     if hub:
         win = win[win["hub"] == hub]
+    if product:
+        win = win[win["product_name"] == product]
     if status != "all":
         win = win[win["delivery_status"].str.lower() == status.lower()]
 
@@ -214,8 +241,13 @@ def heatmap_points(
             "start": start_ts.strftime("%Y-%m-%d"),
             "end": end_ts.strftime("%Y-%m-%d"),
             "hub": hub or "",
+            "product": product or "",
             "status": status,
             "points": [],
+            # Still returned so the picker stays usable after a selection that
+            # happens to have no mapped deliveries — the user can pick again.
+            "products": products_in_window,
+            "hubs": sorted(df["hub"].dropna().unique().tolist()) if "hub" in df.columns else [],
             "totals": {"revenue": 0.0, "deliveries": 0, "units": 0.0, "locations": 0, "customers": 0},
             "coverage": {
                 "rows_in_window": 0, "rows_mapped": 0, "row_pct": 0.0,
@@ -396,6 +428,10 @@ def heatmap_points(
         "end": end_ts.strftime("%Y-%m-%d"),
         "days": int((end_ts - start_ts).days) + 1,
         "hub": hub or "",
+        "product": product or "",
+        # Every product sold in this window, revenue-ranked — populates the
+        # picker. Built before the product filter so the list never collapses.
+        "products": products_in_window,
         "status": status,
         "points": points,
         "point_schema": [

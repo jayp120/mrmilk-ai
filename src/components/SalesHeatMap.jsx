@@ -119,6 +119,10 @@ function percentile(sorted, p) {
 export default function SalesHeatMap() {
   const [windowDays, setWindowDays] = useState(90);
   const [hub, setHub] = useState("");
+  // "" = every product combined (the default). A2 Milk is ~83% of revenue, so
+  // the unfiltered map is effectively a milk map — selecting a product is the
+  // only way to see where the smaller lines actually sell.
+  const [product, setProduct] = useState("");
   const [metric, setMetric] = useState("revenue");
   const [gpsOnly, setGpsOnly] = useState(false);
   const [showCoords, setShowCoords] = useState(false);
@@ -137,7 +141,7 @@ export default function SalesHeatMap() {
     const controller = new AbortController();
     setLoading(true);
     setError("");
-    fetchSalesGeoHeatmap({ windowDays, hub, status: "delivered" }, controller.signal)
+    fetchSalesGeoHeatmap({ windowDays, hub, product, status: "delivered" }, controller.signal)
       .then((payload) => setData(payload))
       .catch((err) => {
         if (err?.name === "AbortError") return;
@@ -145,7 +149,7 @@ export default function SalesHeatMap() {
       })
       .finally(() => setLoading(false));
     return () => controller.abort();
-  }, [windowDays, hub]);
+  }, [windowDays, hub, product]);
 
   const points = useMemo(() => {
     const raw = data?.points || [];
@@ -346,10 +350,11 @@ export default function SalesHeatMap() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `mrmilk-delivery-locations-${data?.start}_${data?.end}.csv`;
+    const slug = product ? product.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase() : "all-products";
+    a.download = `mrmilk-delivery-locations-${slug}-${data?.start}_${data?.end}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [points, data]);
+  }, [points, data, product]);
 
   // ---- styles (match the workspace's existing card language) ---------------
   const card = {
@@ -373,7 +378,8 @@ export default function SalesHeatMap() {
           <div>
             <div style={{ color: "#d2ab67", fontSize: 15, fontWeight: 800 }}>Delivery heat map</div>
             <div style={{ color: "#6f86aa", fontSize: 12, marginTop: 4, lineHeight: 1.55, maxWidth: 620 }}>
-              Where deliveries actually land across Pune &amp; PCMC. Heat follows{" "}
+              Where <strong style={{ color: "#23486b" }}>{product || "all products"}</strong> actually land
+              across Pune &amp; PCMC. Heat follows{" "}
               <strong style={{ color: "#23486b" }}>{activeMetric?.label.toLowerCase()}</strong> — {activeMetric?.help}
             </div>
           </div>
@@ -413,7 +419,55 @@ export default function SalesHeatMap() {
             <option value="">All hubs</option>
             {(data?.hubs || []).map((h) => <option key={h} value={h}>{h}</option>)}
           </select>
+
+          <span style={{ ...label, marginLeft: 6 }}>product</span>
+          <select
+            value={product}
+            onChange={(e) => setProduct(e.target.value)}
+            style={{
+              background: product ? "#eef6ff" : "#f8fbff",
+              border: `1px solid ${product ? "#2a78d6" : "#c4daee"}`,
+              borderRadius: 8, color: "#23486b", padding: "8px 10px",
+              fontSize: 12, fontWeight: 600, maxWidth: 300,
+            }}
+          >
+            <option value="">All products</option>
+            {(data?.products || []).map((p) => (
+              <option key={p.product_name} value={p.product_name}>
+                {p.product_name} ({p.share_pct}%)
+              </option>
+            ))}
+          </select>
         </div>
+
+        {/* Without this, the default view reads as "our delivery footprint"
+            when it is really "where we deliver milk" — A2 Milk alone is ~83%
+            of revenue, so everything else is invisible underneath it. */}
+        {!product && (data?.products?.[0]?.share_pct ?? 0) > 50 && (
+          <div style={{ color: "#8a6d3b", fontSize: 11.5, lineHeight: 1.6, marginTop: 10 }}>
+            Showing <strong>all {data.products.length} products</strong> together —
+            but <strong>{data.products[0].product_name}</strong> is {data.products[0].share_pct}% of
+            revenue here, so this is effectively a map of that one product.
+            Pick a product above to see where the smaller lines actually sell.
+          </div>
+        )}
+        {product && (
+          <div style={{ color: "#23486b", fontSize: 11.5, lineHeight: 1.6, marginTop: 10 }}>
+            Filtered to <strong>{product}</strong>
+            {(() => {
+              const p = (data?.products || []).find((x) => x.product_name === product);
+              return p ? ` — ${p.share_pct}% of revenue in this period, ${n0(p.lines)} delivery lines.` : ".";
+            })()}{" "}
+            <button
+              type="button"
+              onClick={() => setProduct("")}
+              style={{ background: "none", border: "none", padding: 0, cursor: "pointer",
+                       color: "#2a78d6", fontSize: 11.5, fontWeight: 700, textDecoration: "underline" }}
+            >
+              Show all products
+            </button>
+          </div>
+        )}
       </div>
 
       {/* KPI tiles */}

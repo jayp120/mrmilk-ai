@@ -401,13 +401,14 @@ export async function fetchReferralOpportunities(
  * (a known bad-GPS cluster near Delhi).
  */
 export async function fetchSalesGeoHeatmap(
-  { start = "", end = "", hub = "", status = "delivered", windowDays = 90 } = {},
+  { start = "", end = "", hub = "", product = "", status = "delivered", windowDays = 90 } = {},
   signal,
 ) {
   const params = new URLSearchParams();
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   if (hub) params.set("hub", hub);
+  if (product) params.set("product", product);
   if (status) params.set("status", status);
   if (windowDays) params.set("window_days", String(windowDays));
   const response = await apiFetch(`/api/sales/geo-heatmap?${params.toString()}`, {

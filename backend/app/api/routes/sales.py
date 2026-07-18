@@ -105,6 +105,7 @@ def geo_heatmap(
     start: str | None = Query(None, description="Window start (YYYY-MM-DD). Defaults to `window_days` before the end."),
     end: str | None = Query(None, description="Window end (YYYY-MM-DD). Defaults to the dataset's last sale."),
     hub: str | None = Query(None, description="Exact hub name. Omit for all hubs."),
+    product: str | None = Query(None, description="Exact product_name. Omit for ALL products (default)."),
     status_filter: str = Query("delivered", alias="status", description="'delivered' (default) or 'all'."),
     window_days: int = Query(90, ge=1, le=730, description="Trailing window when `start` is omitted."),
     _actor: AuthUser = Depends(require_permission("reports:read")),
@@ -118,7 +119,8 @@ def geo_heatmap(
     `coverage` block states what share of rows / revenue / customers the map
     actually represents — always surface it, the map is a ~68% sample."""
     payload = geo_analytics.heatmap_points(
-        start=start, end=end, hub=hub, status=status_filter, window_days=window_days,
+        start=start, end=end, hub=hub, status=status_filter,
+        window_days=window_days, product=product,
     )
     if payload is None:
         raise HTTPException(

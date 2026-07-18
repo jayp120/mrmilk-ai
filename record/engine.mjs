@@ -6,7 +6,7 @@
 import puppeteer from 'puppeteer-core';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const KEY = process.env.SARVAM_API_KEY;
@@ -272,7 +272,12 @@ export async function build(cfg, narration, scenes) {
   const present = ids.filter((id) => existsSync(join(SEG, `${id}.mp4`)));
   if (!present.length) { log('nothing to stitch'); return; }
   const listFile = join(TMP, 'concat.txt');
-  writeFileSync(listFile, present.map((id) => `file '${join(SEG, `${id}.mp4`).replace(/\\/g,'/')}'`).join('\n'));
+  // MUST be absolute. ffmpeg's concat demuxer resolves relative entries against
+  // the LIST FILE's directory (here, the OS temp dir) — not the working
+  // directory — so a relative outDir like './recordings' silently produces
+  // "Impossible to open .../Temp/narrated-video/recordings/segments/...".
+  writeFileSync(listFile, present
+    .map((id) => `file '${resolve(SEG, `${id}.mp4`).replace(/\\/g,'/')}'`).join('\n'));
   const final = join(OUT, cfg.outFile);
   execFileSync(FF, ['-y','-f','concat','-safe','0','-i',listFile,
     '-c:v','libx264','-preset','veryfast','-crf','23','-pix_fmt','yuv420p',

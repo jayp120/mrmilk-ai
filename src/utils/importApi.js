@@ -365,6 +365,32 @@ export async function fetchSalesDailyByHub(
 }
 
 /**
+ * Neighbour-referral worklist: buildings where a loyal customer is the only
+ * one ordering. Returns { opportunities, summary, excluded_customers,
+ * criteria, hubs, areas }.
+ *
+ * `excluded_customers` matters — coordinates that disagree with their area's
+ * GPS consensus are dropped rather than ranked, so the list is deliberately
+ * shorter than the full customer book.
+ */
+export async function fetchReferralOpportunities(
+  { minDeliveries = 30, maxInBuilding = 1, hub = "", area = "", limit = 200 } = {},
+  signal,
+) {
+  const params = new URLSearchParams();
+  params.set("min_deliveries", String(minDeliveries));
+  params.set("max_in_building", String(maxInBuilding));
+  if (hub) params.set("hub", hub);
+  if (area) params.set("area", area);
+  params.set("limit", String(limit));
+  const response = await apiFetch(`/api/sales/referrals?${params.toString()}`, {
+    method: "GET",
+    signal,
+  });
+  return parseApiResponse(response);
+}
+
+/**
  * Delivery coordinates aggregated into heat-map points for a date window.
  * Returns { points: [[lat, lng, revenue, deliveries, units, customers], ...],
  *   point_schema, totals, coverage, excluded, hubs, dataset }.

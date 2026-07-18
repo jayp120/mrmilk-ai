@@ -13,6 +13,7 @@ import DailyProductSales from "./src/components/DailyProductSales.jsx";
 // Lazy: pulls in deck.gl (~250kB) for the WebGL heat layer. Only the Delivery
 // Map tab needs it, so it should not add weight to every other tab's load.
 const SalesHeatMap = lazy(() => import("./src/components/SalesHeatMap.jsx"));
+import ReferralEngine from "./src/components/ReferralEngine.jsx";
 import ImportCenter from "./src/ImportCenter.jsx";
 import { fetchChatNotebook, fetchCustomerRecords, fetchCustomerSummary, fetchImportHistory, proxyChat, streamChatNotebook } from "./src/utils/importApi.js";
 import NotebookAnswer from "./src/chat/NotebookAnswer.jsx";
@@ -5737,7 +5738,7 @@ export default function App({ authUser = null, onLogout = null } = {}) {
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:"1px solid #c4daee",background:"#ffffff",flexShrink:0,position:"relative",zIndex:1}}>
-        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"heatmap",label:"Delivery Map"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
+        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"heatmap",label:"Delivery Map"},{id:"referrals",label:"Referrals"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",borderBottom:`3px solid ${tab===t.id?rc:"transparent"}`,color:tab===t.id?rc:"#4d5b78",padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
             {t.label}
           </button>
@@ -6015,6 +6016,13 @@ export default function App({ authUser = null, onLogout = null } = {}) {
           <Suspense fallback={<div style={{color:"#6f86aa",fontSize:13,padding:20}}>Loading delivery map…</div>}>
             <SalesHeatMap />
           </Suspense>
+        </div>
+      )}
+
+      {/* REFERRAL ENGINE TAB */}
+      {tab==="referrals" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <ReferralEngine />
         </div>
       )}
 

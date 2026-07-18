@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ...auth import AuthUser, require_permission
-from ...services import geo_analytics, sales_analytics
+from ...services import geo_analytics, referral_analytics, sales_analytics
 
 router = APIRouter(prefix="/api/sales", tags=["sales"])
 
@@ -58,6 +58,39 @@ def by_hub(
     stacked chart. Always covers every hub for the selection."""
     payload = sales_analytics.hub_breakdown(
         product=product, weight=weight, start=start, end=end, status=status_filter,
+    )
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No sales dataset found. Upload sales transactions first.",
+        )
+    return payload
+
+
+@router.get("/referrals")
+def referrals(
+    min_deliveries: int = Query(30, ge=1, le=1000, description="Minimum deliveries for the anchor customer."),
+    max_in_building: int = Query(1, ge=1, le=5, description="1 = solo customer in the building (purest case)."),
+    hub: str | None = Query(None, description="Exact hub name. Omit for all hubs."),
+    area: str | None = Query(None, description="Exact area name. Omit for all areas."),
+    limit: int = Query(200, ge=1, le=1000),
+    _actor: AuthUser = Depends(require_permission("reports:read")),
+) -> dict:
+    """Buildings where a loyal customer is the ONLY one ordering — a ranked
+    neighbour-referral worklist.
+
+    ~90% of located buildings hold exactly one customer, yet the delivery boy is
+    already on that doorstep every morning, so a neighbour costs almost nothing
+    extra to serve. Each row names the anchor customer to ask, their loyalty
+    evidence, the boy already on site, and what a neighbour there is worth.
+
+    Coordinates that disagree with their own area's GPS consensus are EXCLUDED,
+    not ranked — a doorstep worklist has to be right about the doorstep. The
+    `excluded_customers` block reports how many were dropped and why."""
+    payload = referral_analytics.find_opportunities(
+        min_deliveries=min_deliveries,
+        max_customers_in_building=max_in_building,
+        hub=hub, area=area, limit=limit,
     )
     if payload is None:
         raise HTTPException(

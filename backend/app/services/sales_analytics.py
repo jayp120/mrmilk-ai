@@ -43,6 +43,38 @@ _TEXT_COLUMNS = ("product_name", "product_weight", "delivery_status", "mobile", 
 # Empty hub label shown to the user when the source row has no hub.
 _NO_HUB = "(No hub)"
 
+# ----------------------------------------------------------------------
+# Non-product line items.
+#
+# MilkMaster records some OPERATIONAL events as sales rows. "Cash Pick Up
+# request" is a cash-collection visit, not a sale: 3,034 rows carrying
+# sub_total = Rs 0 but a qty_net that sums to 9,922,179 — which is 94% of
+# every "unit" in the dataset (the field appears to hold a rupee amount, not
+# a quantity).
+#
+# Left in, these rows:
+#   * make any litres/units total meaningless,
+#   * appear in the product picker as a selectable "product",
+#   * inflate delivery counts with visits where nothing was delivered.
+#
+# Revenue is unaffected either way (they are Rs 0), so excluding them changes
+# no revenue figure anywhere — it only removes the corruption.
+#
+# Excluded at load time so NOTHING downstream can accidentally include them.
+# ----------------------------------------------------------------------
+NON_PRODUCT_LINE_ITEMS = frozenset({
+    "cash pick up request",
+})
+
+
+def _drop_non_product_rows(df):
+    """Remove operational (non-sale) line items. Returns (df, n_dropped)."""
+    if "product_name" not in df.columns:
+        return df, 0
+    mask = df["product_name"].astype(str).str.strip().str.lower().isin(NON_PRODUCT_LINE_ITEMS)
+    n = int(mask.sum())
+    return (df[~mask], n) if n else (df, 0)
+
 _lock = threading.Lock()
 _cache: dict[str, Any] = {"mtime": None, "df": None}
 
@@ -76,9 +108,14 @@ def _load_df():
         if "hub" in df.columns:
             df["hub"] = df["hub"].str.strip().replace("", _NO_HUB)
 
+        df, dropped = _drop_non_product_rows(df)
+
         _cache["df"] = df
         _cache["mtime"] = mtime
-        logger.info("sales_analytics: loaded %d sales rows", len(df))
+        logger.info(
+            "sales_analytics: loaded %d sales rows (%d non-product line items excluded)",
+            len(df), dropped,
+        )
         return df
 
 

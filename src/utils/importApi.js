@@ -245,10 +245,12 @@ export async function previewSalesAppend(file, role, signal) {
  *   strategy: 'skip'    — keep existing rows on collision (safe default)
  *             'replace' — overwrite existing rows with the new file's version
  */
-export async function commitSalesAppend({ file, role, strategy = "skip" }) {
+export async function commitSalesAppend({ file, role, strategy = "skip", confirmPartial = false }) {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("strategy", strategy);
+  // Required to override the partial-export guard (e.g. a hub-filtered file).
+  formData.append("confirm_partial", confirmPartial ? "true" : "false");
   const response = await apiFetch("/api/imports/sales/append", {
     method: "POST",
     body: formData,
@@ -356,6 +358,33 @@ export async function fetchSalesDailyByHub(
   if (end) params.set("end", end);
   if (status) params.set("status", status);
   const response = await apiFetch(`/api/sales/daily-by-hub?${params.toString()}`, {
+    method: "GET",
+    signal,
+  });
+  return parseApiResponse(response);
+}
+
+/**
+ * Delivery coordinates aggregated into heat-map points for a date window.
+ * Returns { points: [[lat, lng, revenue, deliveries, units, customers], ...],
+ *   point_schema, totals, coverage, excluded, hubs, dataset }.
+ *
+ * `coverage` matters: only ~2/3 of delivery rows carry coordinates, so the map
+ * is a sample, not the full book — always show coverage alongside it.
+ * `excluded` reports rows dropped for sitting outside the Pune/PCMC bbox
+ * (a known bad-GPS cluster near Delhi).
+ */
+export async function fetchSalesGeoHeatmap(
+  { start = "", end = "", hub = "", status = "delivered", windowDays = 90 } = {},
+  signal,
+) {
+  const params = new URLSearchParams();
+  if (start) params.set("start", start);
+  if (end) params.set("end", end);
+  if (hub) params.set("hub", hub);
+  if (status) params.set("status", status);
+  if (windowDays) params.set("window_days", String(windowDays));
+  const response = await apiFetch(`/api/sales/geo-heatmap?${params.toString()}`, {
     method: "GET",
     signal,
   });

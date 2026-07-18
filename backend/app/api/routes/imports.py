@@ -363,16 +363,22 @@ async def commit_sales_append(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     strategy: str = Form("skip"),  # "skip" (safe default) | "replace"
+    confirm_partial: str = Form("false"),
     actor: AuthUser = Depends(require_permission("imports:write")),
 ) -> dict:
     """Append-merge a 2-month export into the existing sales dataset.
 
     strategy:
-      - 'skip'    → on collision (same date/invoice_id/product_id/mobile), keep
+      - 'skip'    → on collision (same date/customer_id/product_id/mobile), keep
                     the existing row. Adds only truly new rows. SAFE DEFAULT.
       - 'replace' → on collision, overwrite the existing row with the new one.
                     Use when MilkMaster fixed an error and you're pulling
                     the correction.
+
+    Rejects with 409 when the file looks like a PARTIAL export (e.g. one hub
+    missing) unless `confirm_partial=true`. A hub-filtered file collides with
+    nothing, so without this gate it imports "successfully" and silently
+    understates the period — exactly how May 2026 lost Rs 9.28L.
     """
     role = _ensure_upload_user(actor)
     payload = await _read_upload_with_cap(file)
@@ -386,8 +392,26 @@ async def commit_sales_append(
             detail=f"strategy must be 'skip' or 'replace', got {strategy!r}.",
         )
 
-    result = _sales.commit_append(payload, file.filename or "sales.csv", strategy=strategy_clean)
+    result = _sales.commit_append(
+        payload, file.filename or "sales.csv",
+        strategy=strategy_clean,
+        confirm_partial=confirm_partial.strip().lower() == "true",
+    )
     if not result.get("ok"):
+        # A partial export is a distinct, recoverable case: the operator can
+        # re-export with all hubs, or deliberately override. 409 (not 400) so
+        # the UI can tell "fix your file" apart from "this file is broken".
+        if result.get("error") == "incomplete_export":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "This looks like a PARTIAL export — importing it would silently understate the period.",
+                    "error": "incomplete_export",
+                    "issues": result.get("detail", []),
+                    "completeness": result.get("completeness"),
+                    "hint": "Re-export from MilkMaster with ALL hubs selected, or re-submit with confirm_partial=true if the filter was intentional.",
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={

@@ -83,6 +83,9 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard, onImpo
   // exports cap at ~2 months and users will mostly add, not wipe.
   const [salesMode, setSalesMode] = useState("append");           // 'append' | 'replace'
   const [salesAppendPreview, setSalesAppendPreview] = useState(null);
+  // Explicit override for a partial (e.g. hub-filtered) export. Resets on every
+  // new preview so a previous override can never carry over to another file.
+  const [salesConfirmPartial, setSalesConfirmPartial] = useState(false);
   const [salesAppendStrategy, setSalesAppendStrategy] = useState("skip"); // 'skip' | 'replace'
 
   const refreshHistory = useCallback(async () => {
@@ -197,6 +200,7 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard, onImpo
     setSalesProfile(null);
     setSalesProfileError("");
     setSalesNotice("");
+    setSalesConfirmPartial(false);
     try {
       const payload = await previewSalesAppend(file, role);
       setSalesAppendPreview(payload);
@@ -275,6 +279,7 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard, onImpo
         file: salesFile,
         role,
         strategy: salesAppendStrategy,
+        confirmPartial: salesConfirmPartial,
       });
       setSalesNotice(payload.message || "Sales report appended.");
       resetSalesUpload();
@@ -786,6 +791,64 @@ export default function ImportCenter({ role, roleMeta, onBackToDashboard, onImpo
                   Append preview — nothing is committed until you click a strategy below
                 </strong>
               </div>
+
+              {/* Partial-export detection. A hub-filtered file collides with
+                  nothing, so without this it imports "successfully" and
+                  silently understates the period. Shown BEFORE the strategy
+                  buttons so it can't be missed. */}
+              {(salesAppendPreview.completeness?.issues || []).length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  {salesAppendPreview.completeness.issues.map((issue, i) => {
+                    const blocking = issue.severity === "blocking";
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          border: `1px solid ${blocking ? "#e0a2a2" : "#e8d3a8"}`,
+                          background: blocking ? "#fdf3f3" : "#fffaf0",
+                          borderRadius: 10,
+                          padding: "10px 12px",
+                          marginBottom: 8,
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                          <span style={{ fontSize: 15, lineHeight: 1.3 }}>{blocking ? "🛑" : "⚠️"}</span>
+                          <div>
+                            <strong style={{ color: blocking ? "#a13b3b" : "#8a6d3b", fontSize: 12.5 }}>
+                              {blocking ? "Blocked — this looks like a partial export" : "Check this before importing"}
+                            </strong>
+                            <div style={{ color: "#5f6b7a", fontSize: 12, lineHeight: 1.6, marginTop: 3 }}>
+                              {issue.message}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(salesAppendPreview.completeness?.blocking || []).length > 0 && (
+                    <label
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer",
+                        fontSize: 12, color: "#a13b3b", lineHeight: 1.5, padding: "2px 2px 0",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={salesConfirmPartial}
+                        onChange={(e) => setSalesConfirmPartial(e.target.checked)}
+                        style={{ marginTop: 2 }}
+                      />
+                      <span>
+                        I know this file is missing a hub and want to import it anyway.
+                        <span style={{ color: "#8a6d3b" }}>
+                          {" "}Only tick this if the filter was deliberate — otherwise re-export from
+                          MilkMaster with all hubs selected.
+                        </span>
+                      </span>
+                    </label>
+                  )}
+                </div>
+              )}
 
               <div className="import-center__profileGrid">
                 <div>

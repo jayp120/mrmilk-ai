@@ -454,10 +454,29 @@ def schedule_embedding_rewarm(session) -> None:
 # are limited to ~2 months; users incrementally build a full year over
 # 6 uploads without losing history.
 #
-# Dedup key: (date, invoice_id, product_id, mobile)
-# Why composite? `invoice_id` reuses 0 as a placeholder and is reused
-# across line items — only 20k distinct values for 361k rows. The
-# 4-column key gets 99.9% row uniqueness on the real data.
+# Dedup key: (date, customer_id, product_id, mobile)
+#
+# NOTE — `invoice_id` was deliberately REMOVED from this key in July 2026
+# after it silently corrupted April 2026.
+#
+# What happened: April was re-exported from MilkMaster and appended. The
+# re-export carried DIFFERENT invoice_ids for the same physical deliveries, so
+# every row looked new to the old key, "skip" mode appended all of it, and the
+# month ended up with 1.65 rows per (customer, date, product) instead of 1.00
+# — 55,822 rows and Rs 65.7L against MilkMaster's true 35,453 rows / Rs 41.7L.
+# A 57% overstatement that no error surfaced, because from the key's point of
+# view nothing collided.
+#
+# Including a volatile, source-assigned identifier in a dedup key means the key
+# can only ever detect *byte-identical re-exports*. The business fact we
+# actually need to deduplicate on is "this customer received this product on
+# this day" — which is stable no matter how many times MilkMaster re-issues
+# the paperwork. Hence the key below.
+#
+# Trade-off accepted: a customer legitimately receiving the same product twice
+# in one day on two separate invoices now collapses to one row under "skip".
+# That is rare (0.1% of groups in the verified-clean months) and vastly
+# preferable to silently inflating a month by 57%.
 #
 # Strategies (when the new file's date range overlaps existing data):
 #   - "skip"     → keep existing rows on collision; only append rows whose
@@ -466,12 +485,12 @@ def schedule_embedding_rewarm(session) -> None:
 #                  Apr 24, the Apr overlap is just re-export of correct data."
 #   - "replace"  → for every composite key in the new file, drop the matching
 #                  row from existing, then add the new file's version. Use
-#                  only when MilkMaster fixed an error and you're pulling
-#                  the correction.
+#                  when MilkMaster fixed an error and you're pulling the
+#                  correction — this is the right mode for a re-export.
 #
 # Atomic write contract identical to commit() — .tmp then os.replace().
 # ----------------------------------------------------------------------
-DEDUP_KEY_COLUMNS = ("date", "invoice_id", "product_id", "mobile", "customer_id")
+DEDUP_KEY_COLUMNS = ("date", "customer_id", "product_id", "mobile")
 
 
 def _read_existing_parquet():
@@ -574,6 +593,110 @@ def _dedup_key_set(df):
     return set(df[list(DEDUP_KEY_COLUMNS)].itertuples(index=False, name=None))
 
 
+def check_completeness(new_df, existing_df) -> dict[str, Any]:
+    """Detect a PARTIAL export before it silently corrupts the dataset.
+
+    Why this exists: the dedup key protects against duplicate rows, but it is
+    useless against MISSING rows — a hub-filtered export has nothing to collide
+    with, so the import succeeds cleanly and the numbers just quietly go wrong.
+
+    This has happened twice on real data:
+      * a Pune-only file appended over a period that should have had both hubs,
+      * May 2026 stored with 25,586 Pune rows and ZERO Chinchwad, understating
+        the month by Rs 9.28L and hiding 456 real customers for weeks.
+
+    Neither raised an error. Both were found by eye, long after the fact.
+
+    So: compare the incoming file's hub mix and per-day customer volume against
+    what the existing dataset shows for a comparable recent window, and surface
+    anything that looks truncated. Advisory, not fatal — the caller decides
+    whether to block. A genuinely hub-specific upload is legitimate; it just
+    has to be a deliberate choice rather than an accident.
+    """
+    import pandas as pd
+
+    issues: list[dict[str, Any]] = []
+    if new_df is None or new_df.empty:
+        return {"ok": True, "issues": issues}
+
+    new_dates = pd.to_datetime(new_df["date"], errors="coerce")
+    win_lo, win_hi = new_dates.min(), new_dates.max()
+    span_days = max((win_hi - win_lo).days + 1, 1)
+
+    # ---- hub coverage -------------------------------------------------
+    if existing_df is not None and not existing_df.empty and "hub" in new_df.columns:
+        ex_dates = pd.to_datetime(existing_df["date"], errors="coerce")
+        # Reference = the 60 days of existing data before this file's window.
+        ref = existing_df[(ex_dates < win_lo) & (ex_dates >= win_lo - pd.Timedelta(days=60))]
+        if ref.empty:  # brand-new history — fall back to the whole dataset
+            ref = existing_df
+
+        def hubset(d):
+            h = d["hub"].fillna("").astype(str).str.strip()
+            return {x for x in h.unique() if x}
+
+        ref_hubs, new_hubs = hubset(ref), hubset(new_df)
+        absent = ref_hubs - new_hubs
+        if absent and ref_hubs:
+            ref_counts = ref["hub"].fillna("").astype(str).str.strip().value_counts()
+            lost_share = sum(ref_counts.get(h, 0) for h in absent) / max(len(ref), 1)
+            issues.append({
+                "code": "missing_hub",
+                "severity": "blocking" if lost_share > 0.05 else "warning",
+                "message": (
+                    f"This file contains no rows for: {', '.join(sorted(absent))}. "
+                    f"Your recent data has {len(ref_hubs)} hub(s) "
+                    f"({', '.join(sorted(ref_hubs))}), and the missing one(s) account for "
+                    f"{100*lost_share:.0f}% of recent deliveries. "
+                    "If you exported with a hub filter, re-export with ALL hubs selected."
+                ),
+                "detail": {"expected_hubs": sorted(ref_hubs), "file_hubs": sorted(new_hubs),
+                           "missing_hubs": sorted(absent), "recent_share_missing": round(lost_share, 4)},
+            })
+
+    # ---- daily volume -------------------------------------------------
+    if existing_df is not None and not existing_df.empty:
+        ex_dates = pd.to_datetime(existing_df["date"], errors="coerce")
+        ref = existing_df[(ex_dates < win_lo) & (ex_dates >= win_lo - pd.Timedelta(days=60))]
+        if not ref.empty:
+            ref_per_day = len(ref) / max(pd.to_datetime(ref["date"]).dt.date.nunique(), 1)
+            new_per_day = len(new_df) / max(new_dates.dt.date.nunique(), 1)
+            if ref_per_day > 0 and new_per_day < ref_per_day * 0.75:
+                issues.append({
+                    "code": "low_volume",
+                    "severity": "warning",
+                    "message": (
+                        f"This file averages {new_per_day:,.0f} rows/day, but your recent data "
+                        f"averages {ref_per_day:,.0f} ({100*(new_per_day/ref_per_day-1):+.0f}%). "
+                        "It may be a partial export."
+                    ),
+                    "detail": {"file_rows_per_day": round(new_per_day, 1),
+                               "recent_rows_per_day": round(ref_per_day, 1)},
+                })
+
+    # ---- calendar gaps inside the file's own window --------------------
+    present = set(new_dates.dt.date.dropna().unique())
+    expected = set(pd.date_range(win_lo, win_hi, freq="D").date)
+    gaps = sorted(expected - present)
+    if gaps and span_days > 1:
+        issues.append({
+            "code": "missing_days",
+            "severity": "warning",
+            "message": (
+                f"{len(gaps)} day(s) inside this file's own date range have no rows at all"
+                + (f" (e.g. {', '.join(str(g) for g in gaps[:5])})" if gaps else "")
+                + ". Confirm those were genuinely non-delivery days."
+            ),
+            "detail": {"missing_days": [str(g) for g in gaps[:30]], "count": len(gaps)},
+        })
+
+    return {
+        "ok": not any(i["severity"] == "blocking" for i in issues),
+        "issues": issues,
+        "blocking": [i for i in issues if i["severity"] == "blocking"],
+    }
+
+
 def analyze_for_append(buffer: bytes, file_name: str) -> dict[str, Any]:
     """Dry-run analysis of an append upload. Returns a structured diff the UI
     can render before the user commits. Does NOT write to disk."""
@@ -594,6 +717,7 @@ def analyze_for_append(buffer: bytes, file_name: str) -> dict[str, Any]:
 
     existing_df = _read_existing_parquet()
     new_df_keyed = _coerce_dedup_columns(new_df)
+    completeness = check_completeness(new_df, existing_df)
 
     new_range = (
         pd.to_datetime(new_df_keyed["date"]).min().strftime("%Y-%m-%d"),
@@ -616,6 +740,7 @@ def analyze_for_append(buffer: bytes, file_name: str) -> dict[str, Any]:
             "projected_total_after_replace": int(len(new_df)),
             "warnings": info["warnings"]
             + ["No existing sales dataset — this upload will become the initial dataset."],
+            "completeness": completeness,
         }
 
     existing_keyed = _coerce_dedup_columns(existing_df)
@@ -721,11 +846,25 @@ def analyze_for_append(buffer: bytes, file_name: str) -> dict[str, Any]:
         "dedup_key": list(DEDUP_KEY_COLUMNS),
         "internal_duplicates_in_new_file": int(internal_dupes_in_new_file),
         "warnings": warnings_out,
+        # Partial-export detection. `completeness.blocking` non-empty means the
+        # UI must force an explicit override before this file can be committed.
+        "completeness": completeness,
     }
 
 
-def commit_append(buffer: bytes, file_name: str, strategy: str = "skip") -> dict[str, Any]:
-    """Commit an append-mode upload. strategy = 'skip' (default, safe) or 'replace'."""
+def commit_append(
+    buffer: bytes,
+    file_name: str,
+    strategy: str = "skip",
+    confirm_partial: bool = False,
+) -> dict[str, Any]:
+    """Commit an append-mode upload. strategy = 'skip' (default, safe) or 'replace'.
+
+    `confirm_partial` must be True to proceed when the completeness check finds
+    a blocking issue (e.g. an entire hub absent). Defaults to False so a
+    filtered export cannot be committed by accident — the failure mode that
+    understated May 2026 by Rs 9.28L.
+    """
     import pandas as pd
 
     if strategy not in ("skip", "replace"):
@@ -743,6 +882,18 @@ def commit_append(buffer: bytes, file_name: str, strategy: str = "skip") -> dict
         }
     if new_df.empty:
         return {"ok": False, "error": "empty_after_parse", "warnings": info["warnings"]}
+
+    # Refuse a partial export unless the caller has explicitly overridden.
+    # Checked BEFORE taking the write lock so a rejected upload costs nothing.
+    _existing_for_check = _read_existing_parquet()
+    completeness = check_completeness(new_df, _existing_for_check)
+    if completeness["blocking"] and not confirm_partial:
+        return {
+            "ok": False,
+            "error": "incomplete_export",
+            "detail": [i["message"] for i in completeness["blocking"]],
+            "completeness": completeness,
+        }
 
     # Serialize concurrent uploads — without this, two workers can each read
     # the same existing_df, each compute a different merged frame, and the
@@ -830,6 +981,7 @@ def commit_append(buffer: bytes, file_name: str, strategy: str = "skip") -> dict
             "distinct_counts": distinct_counts,
             "columns": list(merged.columns),
             "warnings": info["warnings"],
+            "completeness": completeness,
             "merge_strategy": strategy,
             "append_summary": {
                 "rows_before": rows_before,

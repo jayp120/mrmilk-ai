@@ -36,7 +36,10 @@ export default defineConfig({
           react_vendor: ["react", "react-dom"],
           charts_vendor: ["echarts", "echarts-for-react"],
           data_vendor: ["papaparse", "xlsx", "@tanstack/react-table", "date-fns"],
-          analytics_vendor: ["@duckdb/duckdb-wasm", "json-rules-engine", "uuid"]
+          analytics_vendor: ["@duckdb/duckdb-wasm", "json-rules-engine", "uuid"],
+          // Only the Delivery Map tab uses this — kept out of the main chunk
+          // so every other tab isn't paying ~250kB for a WebGL heat layer.
+          geo_vendor: ["@deck.gl/core", "@deck.gl/layers", "@deck.gl/google-maps", "@deck.gl/aggregation-layers"]
         }
       }
     }

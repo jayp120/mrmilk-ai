@@ -1,4 +1,4 @@
-import React, { startTransition, useState, useRef, useEffect, useMemo, useDeferredValue } from "react";
+import React, { startTransition, useState, useRef, useEffect, useMemo, useDeferredValue, Suspense, lazy } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -10,6 +10,9 @@ import { CanvasRenderer } from "echarts/renderers";
 import { captureChatAudit } from "./mrmilk-chat-audit.js";
 import ContentStudio from "./src/ContentStudio.jsx";
 import DailyProductSales from "./src/components/DailyProductSales.jsx";
+// Lazy: pulls in deck.gl (~250kB) for the WebGL heat layer. Only the Delivery
+// Map tab needs it, so it should not add weight to every other tab's load.
+const SalesHeatMap = lazy(() => import("./src/components/SalesHeatMap.jsx"));
 import ImportCenter from "./src/ImportCenter.jsx";
 import { fetchChatNotebook, fetchCustomerRecords, fetchCustomerSummary, fetchImportHistory, proxyChat, streamChatNotebook } from "./src/utils/importApi.js";
 import NotebookAnswer from "./src/chat/NotebookAnswer.jsx";
@@ -3995,6 +3998,47 @@ export default function App({ authUser = null, onLogout = null } = {}) {
     }));
   }, [D.total_customers, appData]);
 
+  // "Closed Won" — Trial Not Converted customers whose real behaviour (spend
+  // or order count) already looks converted, even though MilkMaster hasn't
+  // relabelled their status yet. Rule: revenue >= Rs.495 OR orders >= 7.
+  // The base "Trial Not Converted" tile above is untouched — this is a
+  // separate, sorted view of the same underlying customers.
+  const CLOSED_WON_MIN_REVENUE = 495;
+  const CLOSED_WON_MIN_ORDERS = 7;
+  const trialNotConvertedRecords = useMemo(
+    () => customerRecords.filter((r) => isExactMilkMasterStatus(r.status, "Trial Not Converted")),
+    [customerRecords]
+  );
+  const closedWonRecords = useMemo(
+    () => trialNotConvertedRecords
+      .filter((r) => toInt(r.revenue) >= CLOSED_WON_MIN_REVENUE || toInt(r.orders) >= CLOSED_WON_MIN_ORDERS)
+      .sort((a, b) => toInt(b.revenue) - toInt(a.revenue)),
+    [trialNotConvertedRecords]
+  );
+  const closedWonPct = trialNotConvertedRecords.length
+    ? (closedWonRecords.length / trialNotConvertedRecords.length) * 100
+    : 0;
+  // Second list carved from Closed Won: customers whose last order was placed
+  // BEFORE the last 30 days — behaviourally converted but now gone quiet, so
+  // they're the win-back call list. Sorted most-recently-lapsed first (their
+  // last delivery date descending; revenue as tie-break). last_delivery is an
+  // ISO date (YYYY-MM-DD) so plain string comparison is safe. Rows with no
+  // last-delivery date are excluded (can't prove when they lapsed).
+  const closedWonLapseCutoff = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return toISODateString(d);
+  }, []);
+  const closedWonLapsedRecords = useMemo(
+    () => closedWonRecords
+      .filter((r) => {
+        const last = toText(r.last_delivery);
+        return last && last < closedWonLapseCutoff;
+      })
+      .sort((a, b) => toText(b.last_delivery).localeCompare(toText(a.last_delivery)) || toInt(b.revenue) - toInt(a.revenue)),
+    [closedWonRecords, closedWonLapseCutoff]
+  );
+
   const hubData = useMemo(() => Object.entries(appData.hub_performance || {})
     .map(([name, d]) => ({ name: name.length > 12 ? name.slice(0, 12) : name, rev: Math.round(toNumber(d?.revenue) / 100000), cust: toInt(d?.customers), full: name }))
     .sort((a, b) => b.rev - a.rev), [appData]);
@@ -4718,6 +4762,30 @@ export default function App({ authUser = null, onLogout = null } = {}) {
       profileId: meta.profileId || "status"
     });
   };
+  const openClosedWonProof = (meta = {}) => openProofPanel({
+    title: "Closed Won proof (from Trial Not Converted)",
+    subtitle: `Trial Not Converted customers who have already spent Rs.${CLOSED_WON_MIN_REVENUE}+ or placed ${CLOSED_WON_MIN_ORDERS}+ orders — behaviourally converted, sorted by revenue (highest first).`,
+    customers: closedWonRecords,
+    filters: [`status:Trial Not Converted`, `revenue>=${CLOSED_WON_MIN_REVENUE} OR orders>=${CLOSED_WON_MIN_ORDERS}`],
+    source: `Dashboard | ${dataSource}`,
+    query: "closed won trial not converted customers",
+    openedFrom: "dashboard",
+    sortMode: "revenue_desc",
+    anchorId: meta.anchorId,
+    profileId: meta.profileId || "status"
+  });
+  const openClosedWonLapsedProof = (meta = {}) => openProofPanel({
+    title: "Closed Won — no order in the last 30 days",
+    subtitle: `Closed Won customers (Trial Not Converted with Rs.${CLOSED_WON_MIN_REVENUE}+ spent or ${CLOSED_WON_MIN_ORDERS}+ orders) whose last delivery was BEFORE ${closedWonLapseCutoff} — they proved real demand, then went quiet for 30+ days. Win-back list, sorted most-recently-lapsed first.`,
+    customers: closedWonLapsedRecords,
+    filters: [`status:Trial Not Converted`, `revenue>=${CLOSED_WON_MIN_REVENUE} OR orders>=${CLOSED_WON_MIN_ORDERS}`, `last_delivery<${closedWonLapseCutoff}`],
+    source: `Dashboard | ${dataSource}`,
+    query: "closed won customers with no order in last 30 days",
+    openedFrom: "dashboard",
+    sortMode: "last_delivery_desc",
+    anchorId: meta.anchorId,
+    profileId: meta.profileId || "status"
+  });
   const shouldUseKpiProofLoader = (metric = "", anchorId = "") => metric === "total" && Boolean(toText(anchorId)) && customerRecords.length >= KPI_TOTAL_PROGRESS_THRESHOLD;
   const buildKpiProofPayload = async (metric, setStage = () => {}) => {
     const rows = customerRecords;
@@ -5669,7 +5737,7 @@ export default function App({ authUser = null, onLogout = null } = {}) {
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:"1px solid #c4daee",background:"#ffffff",flexShrink:0,position:"relative",zIndex:1}}>
-        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
+        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"heatmap",label:"Delivery Map"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",borderBottom:`3px solid ${tab===t.id?rc:"transparent"}`,color:tab===t.id?rc:"#4d5b78",padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
             {t.label}
           </button>
@@ -5824,6 +5892,36 @@ export default function App({ authUser = null, onLogout = null } = {}) {
             </div>
           </div>
 
+          {/* Closed Won — Trial Not Converted customers who already behave like
+              converted customers (spend or order count), even though MilkMaster
+              hasn't relabelled them. Separate from the fixed 13-bucket panel
+              above; that panel's "Trial Not Converted" tile and count are
+              untouched — this is a sorted, filtered view of the same customers. */}
+          <div style={{background:"linear-gradient(160deg, #ffffff, #f4fbf6)",border:"1px solid #cfe7d5",borderRadius:16,padding:"18px",boxShadow:"0 16px 34px rgba(26,102,55,0.06)",marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap"}}>
+              <div>
+                <div style={{color:"#1f5b34",fontSize:15,fontWeight:800}}>Closed Won <span style={{color:"#4e7d5f",fontWeight:600}}>(from Trial Not Converted)</span></div>
+                <div style={{color:"#5e8f6f",fontSize:12,marginTop:4,lineHeight:1.55,maxWidth:640}}>
+                  What this list is: out of your <b>{trialNotConvertedRecords.length.toLocaleString()}</b> "Trial Not Converted" customers, these have <b>Rs.{CLOSED_WON_MIN_REVENUE}+ spent</b> OR <b>{CLOSED_WON_MIN_ORDERS}+ orders</b> — real converted behaviour, even though MilkMaster still labels them Trial Not Converted. Sorted highest revenue first. The gold tile narrows this to those whose <b>last order was placed more than 30 days ago</b> — they proved demand, then went quiet — your win-back call list, sorted most-recently-lapsed first. The "Trial Not Converted" tile above is unchanged.
+                </div>
+              </div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",flexShrink:0}}>
+                <button onClick={() => openClosedWonProof({ anchorId: "kpi-closed-won" })} style={{textAlign:"left",background:"#ffffff",border:"1px solid #bde0c7",borderLeft:"4px solid #2fa65d",borderRadius:12,padding:"12px 18px",cursor:"pointer",boxShadow:"0 8px 18px rgba(26,102,55,0.08)",minWidth:160}}>
+                  <div style={{color:"#2fa65d",fontSize:22,fontWeight:800,lineHeight:1.1}}>{closedWonRecords.length.toLocaleString()}</div>
+                  <div style={{color:"#1f5b34",fontSize:12,fontWeight:700,marginTop:3}}>Closed Won customers</div>
+                  <div style={{color:"#5e8f6f",fontSize:11,marginTop:3}}>{closedWonPct.toFixed(1)}% of Trial Not Converted</div>
+                  <div style={{color:"#4e7d5f",fontSize:9,textTransform:"uppercase",letterSpacing:0.7,fontWeight:700,marginTop:6}}>Proof rows</div>
+                </button>
+                <button onClick={() => openClosedWonLapsedProof({ anchorId: "kpi-closed-won-lapsed" })} title="Closed Won customers whose last order was placed more than 30 days ago — proved demand, then went quiet. Win-back list." style={{textAlign:"left",background:"#ffffff",border:"1px solid #ead4ab",borderLeft:"4px solid #d2ab67",borderRadius:12,padding:"12px 18px",cursor:"pointer",boxShadow:"0 8px 18px rgba(139,104,20,0.08)",minWidth:160}}>
+                  <div style={{color:"#b98a2e",fontSize:22,fontWeight:800,lineHeight:1.1}}>{closedWonLapsedRecords.length.toLocaleString()}</div>
+                  <div style={{color:"#8b6914",fontSize:12,fontWeight:700,marginTop:3}}>No order in last 30 days</div>
+                  <div style={{color:"#a07b2d",fontSize:11,marginTop:3}}>last delivery before {closedWonLapseCutoff}</div>
+                  <div style={{color:"#a07b2d",fontSize:9,textTransform:"uppercase",letterSpacing:0.7,fontWeight:700,marginTop:6}}>Win-back list</div>
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Production charts */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:12,marginBottom:14}}>
             <div style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:16,padding:"18px",boxShadow:"0 16px 34px rgba(7,64,105,0.05)"}}>
@@ -5908,6 +6006,15 @@ export default function App({ authUser = null, onLogout = null } = {}) {
       {tab==="sales" && (
         <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
           <DailyProductSales />
+        </div>
+      )}
+
+      {/* DELIVERY HEAT MAP TAB */}
+      {tab==="heatmap" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <Suspense fallback={<div style={{color:"#6f86aa",fontSize:13,padding:20}}>Loading delivery map…</div>}>
+            <SalesHeatMap />
+          </Suspense>
         </div>
       )}
 

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ...auth import AuthUser, require_permission
-from ...services import sales_analytics
+from ...services import geo_analytics, sales_analytics
 
 router = APIRouter(prefix="/api/sales", tags=["sales"])
 
@@ -58,6 +58,34 @@ def by_hub(
     stacked chart. Always covers every hub for the selection."""
     payload = sales_analytics.hub_breakdown(
         product=product, weight=weight, start=start, end=end, status=status_filter,
+    )
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No sales dataset found. Upload sales transactions first.",
+        )
+    return payload
+
+
+@router.get("/geo-heatmap")
+def geo_heatmap(
+    start: str | None = Query(None, description="Window start (YYYY-MM-DD). Defaults to `window_days` before the end."),
+    end: str | None = Query(None, description="Window end (YYYY-MM-DD). Defaults to the dataset's last sale."),
+    hub: str | None = Query(None, description="Exact hub name. Omit for all hubs."),
+    status_filter: str = Query("delivered", alias="status", description="'delivered' (default) or 'all'."),
+    window_days: int = Query(90, ge=1, le=730, description="Trailing window when `start` is omitted."),
+    _actor: AuthUser = Depends(require_permission("reports:read")),
+) -> dict:
+    """Delivery coordinates aggregated into heat-map points, each carrying both
+    revenue and delivery count so the client can weight the layer by either.
+
+    Coordinates come from `delivery_location`, back-filled per customer from
+    their other rows. Captures outside the Pune/PCMC bounding box (a known bad
+    GPS cluster near Delhi) are excluded and reported under `excluded`. The
+    `coverage` block states what share of rows / revenue / customers the map
+    actually represents — always surface it, the map is a ~68% sample."""
+    payload = geo_analytics.heatmap_points(
+        start=start, end=end, hub=hub, status=status_filter, window_days=window_days,
     )
     if payload is None:
         raise HTTPException(

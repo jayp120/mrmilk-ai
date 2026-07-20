@@ -52,6 +52,17 @@ _USE_COLUMNS = [
 # excluding the Delhi cluster and other stray captures.
 PUNE_BBOX = {"lat_min": 18.2, "lat_max": 18.9, "lng_min": 73.5, "lng_max": 74.2}
 
+# Known fallback/default GPS points found INSIDE the valid Pune bbox, so the
+# region filter alone cannot catch them. (18.5211, 73.8502) surfaced 65
+# customers sharing one exact coordinate whose RECORDED areas span 39
+# different, unrelated parts of Pune (Sinhgad Road, Wakad, Kharadi, Moshi,
+# Hadapsar, ...) — a real building never has that area diversity. Detected by
+# flagging any point where 5+ customers share a coordinate but recorded areas
+# among them are also 5+ distinct — a real dense building's customers agree on
+# roughly one area; this artifact's customers don't agree on anything.
+# Add new entries here if the same detection surfaces more in future data.
+KNOWN_FALLBACK_POINTS = frozenset({(18.5211, 73.8502)})
+
 # Default analysis window.
 DEFAULT_WINDOW_DAYS = 90
 
@@ -309,6 +320,15 @@ def heatmap_points(
     rows_backfilled = rows_from_gps - rows_with_own_coords
     rows_from_geocoding = int(has_coords.sum()) - rows_from_gps
     geo = win[has_coords].copy()
+
+    # Drop known fallback points BEFORE aggregation — otherwise 65 unrelated
+    # customers collapse onto one coordinate and render as a single dense
+    # "hotspot" that doesn't correspond to any real place.
+    if KNOWN_FALLBACK_POINTS:
+        fallback_mask = geo.apply(
+            lambda r: (round(r["lat"], 4), round(r["lng"], 4)) in KNOWN_FALLBACK_POINTS, axis=1
+        )
+        geo = geo[~fallback_mask]
     if low_conf_ids and "customer_id" in geo.columns:
         geo["low_confidence"] = geo["customer_id"].isin(low_conf_ids)
     else:

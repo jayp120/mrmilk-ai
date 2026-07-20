@@ -68,6 +68,14 @@ MIN_AREA_SAMPLE = 15
 # building", loose enough to absorb normal GPS jitter between captures.
 BUILDING_PRECISION = 4
 
+# Shared with geo_analytics.py: (18.5211, 73.8502) is a fallback/default GPS
+# point, not a real building — 65 customers land there whose recorded areas
+# span 39 unrelated parts of Pune. A referral pitch built from this point
+# would be built for the wrong person's neighbours. Kept as a local literal
+# (not an import) so this module has no load-bearing dependency on
+# geo_analytics; update both lists together if more are found.
+_FALLBACK_POINTS = frozenset({(18.5211, 73.8502)})
+
 # An anchor must look like a genuine habit, not a trial. These thresholds keep
 # the list credible: asking a 3-delivery customer to recommend us is premature.
 MIN_ANCHOR_DELIVERIES = 30
@@ -192,6 +200,8 @@ def _coord_trust(cid: str, ctx) -> tuple[bool, float | None, str]:
         return False, None, "no_location"
     if not _in_region(loc["lat"], loc["lng"]):
         return False, None, "outside_region"
+    if (round(loc["lat"], 4), round(loc["lng"], 4)) in _FALLBACK_POINTS:
+        return False, None, "known_fallback_point"
 
     area = ctx["cust"].loc[cid, "area"] if cid in ctx["cust"].index else ""
     if not area or area not in ctx["consensus"]:

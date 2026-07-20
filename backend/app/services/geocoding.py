@@ -351,6 +351,167 @@ def geocode_batch(
     }
 
 
+
+# ----------------------------------------------------------------------
+# REVERSE geocoding — coordinate -> what Google calls that place.
+#
+# WHY: MilkMaster's area/sub_area fields are a closed dropdown. When a
+# customer's real locality isn't an option, they pick the nearest listed one
+# instead — so the record says "Wakad" while they actually live somewhere
+# Wakad doesn't cover. The sale still routes fine (GPS drives the map/referral
+# work), but a delivery boy reading the TEXT address gets sent to the wrong
+# neighbourhood. Reverse geocoding recovers what Google calls that exact spot,
+# which is the missing-locality signal: if it doesn't match anything already
+# in the area/sub_area master, that name is a gap worth adding.
+#
+# Separate cache file from forward geocoding — the key spaces don't overlap
+# (rounded lat,lng vs. free-text address) and keeping them apart makes each
+# cache's hit rate legible on its own.
+# ----------------------------------------------------------------------
+REVERSE_CACHE_PATH = CACHE_DIR / "reverse_geocode_cache.json"
+_reverse_cache: dict[str, Any] | None = None
+
+
+def _load_reverse_cache() -> dict[str, Any]:
+    global _reverse_cache
+    if _reverse_cache is not None:
+        return _reverse_cache
+    if REVERSE_CACHE_PATH.is_file():
+        try:
+            with REVERSE_CACHE_PATH.open("r", encoding="utf-8") as fh:
+                _reverse_cache = json.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reverse geocoding: cache read failed (%s), starting empty", exc)
+            _reverse_cache = {}
+    else:
+        _reverse_cache = {}
+    return _reverse_cache
+
+
+def _save_reverse_cache() -> None:
+    cache = _load_reverse_cache()
+    tmp = REVERSE_CACHE_PATH.with_suffix(".json.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(cache, fh, ensure_ascii=False)
+        os.replace(tmp, REVERSE_CACHE_PATH)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reverse geocoding: cache write failed: %s", exc)
+
+
+def _point_key(lat: float, lng: float) -> str:
+    # 4dp ~ 11m — matches the building-level precision used elsewhere, so a
+    # point already resolved for one purpose is reused for this one.
+    return f"{lat:.4f},{lng:.4f}"
+
+
+def _call_google_reverse(lat: float, lng: float, api_key: str) -> dict[str, Any]:
+    params = urllib.parse.urlencode({"latlng": f"{lat},{lng}", "key": api_key, "result_type": "sublocality|neighborhood|locality"})
+    url = f"{GEOCODE_URL}?{params}"
+
+    last_status = "UNKNOWN"
+    for attempt in range(MAX_RETRIES):
+        try:
+            with urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            last_status = f"REQUEST_ERROR: {exc}"
+            time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
+            continue
+
+        status = payload.get("status", "UNKNOWN")
+        last_status = status
+
+        if status == "OK" and payload.get("results"):
+            # Prefer the most granular result: Google returns several, ordered
+            # coarse-to-fine is NOT guaranteed, so pick by specificity of type.
+            def _specificity(r: dict) -> int:
+                types = set(r.get("types", []))
+                if "sublocality_level_2" in types or "neighborhood" in types:
+                    return 3
+                if "sublocality_level_1" in types or "sublocality" in types:
+                    return 2
+                if "locality" in types:
+                    return 1
+                return 0
+
+            best = max(payload["results"], key=_specificity)
+            components = best.get("address_components", [])
+            sublocality = next(
+                (c["long_name"] for c in components
+                 if "sublocality" in c.get("types", []) or "neighborhood" in c.get("types", [])),
+                None,
+            )
+            locality = next((c["long_name"] for c in components if "locality" in c.get("types", [])), None)
+            return {
+                "ok": True,
+                "sublocality": sublocality,
+                "locality": locality,
+                "formatted": best.get("formatted_address", ""),
+                "types": best.get("types", []),
+                "specificity": _specificity(best),
+            }
+
+        if status == "ZERO_RESULTS":
+            return {"ok": False, "status": status}
+        if status in ("OVER_QUERY_LIMIT", "UNKNOWN_ERROR"):
+            time.sleep(RETRY_BASE_SECONDS * (2 ** attempt))
+            continue
+        return {"ok": False, "status": status, "error_message": payload.get("error_message", ""), "terminal": True}
+
+    return {"ok": False, "status": last_status}
+
+
+def reverse_geocode_batch(
+    points: list[tuple[float, float]],
+    qps: float = DEFAULT_QPS,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Resolve (lat, lng) points to Google's neighbourhood/locality name, cached
+    forever per point (a building's neighbourhood doesn't move)."""
+    settings = get_settings()
+    if not settings.google_geocoding_api_key:
+        return {"ok": False, "error": "GOOGLE_GEOCODING_API_KEY is not configured.", "results": {}}
+
+    unique = list(dict.fromkeys(points))  # de-dup, keep order
+    cache = _load_reverse_cache()
+    results: dict[str, dict[str, Any]] = {}
+    stats = {"requested": len(unique), "cache_hits": 0, "api_calls": 0, "resolved": 0, "errors": 0}
+
+    min_interval = 1.0 / qps if qps > 0 else 0.0
+    last_call = 0.0
+
+    for i, (lat, lng) in enumerate(unique):
+        key = _point_key(lat, lng)
+        hit = cache.get(key)
+        if hit is not None:
+            stats["cache_hits"] += 1
+        else:
+            wait = min_interval - (time.monotonic() - last_call)
+            if wait > 0:
+                time.sleep(wait)
+            hit = _call_google_reverse(lat, lng, settings.google_geocoding_api_key)
+            last_call = time.monotonic()
+            stats["api_calls"] += 1
+            cache[key] = hit
+            if stats["api_calls"] % 50 == 0:
+                _save_reverse_cache()
+
+        results[key] = hit
+        if hit.get("ok"):
+            stats["resolved"] += 1
+        else:
+            stats["errors"] += 1
+        if progress and (i % 50 == 0 or i == len(unique) - 1):
+            progress({"done": i + 1, "total": len(unique), **stats})
+
+    _save_reverse_cache()
+    return {
+        "ok": True, "stats": stats, "results": results,
+        "estimated_cost_usd": round(stats["api_calls"] * 5.0 / 1000.0, 2),
+    }
+
+
 def cache_stats() -> dict[str, Any]:
     """Summary of what's already resolved — lets the UI show cache state and
     the true remaining cost before anyone triggers a run."""

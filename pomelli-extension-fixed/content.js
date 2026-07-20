@@ -3,7 +3,7 @@
 // Active injection is done via chrome.scripting.executeScript in background.js
 
 const TAG = '🎨 [MrMilk Content]';
-const BRIDGE_URL = 'http://localhost:3456';
+const BRIDGE_URL = 'http://192.168.101.216:3456';
 
 // Notify background that Pomelli tab is ready
 if (document.readyState === 'complete') {

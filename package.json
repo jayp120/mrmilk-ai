@@ -12,6 +12,10 @@
     "preview": "vite preview --host --port 5173"
   },
   "dependencies": {
+    "@deck.gl/aggregation-layers": "^9.3.7",
+    "@deck.gl/core": "^9.3.7",
+    "@deck.gl/google-maps": "^9.3.7",
+    "@deck.gl/layers": "^9.3.7",
     "@duckdb/duckdb-wasm": "^1.33.1-dev20.0",
     "@fontsource/geist-sans": "^5.2.5",
     "@langfuse/client": "^5.0.2",
@@ -37,6 +41,7 @@
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.5.0",
     "postcss": "^8.5.10",
+    "puppeteer-core": "^25.3.0",
     "tailwindcss": "^3.4.17",
     "typescript": "^6.0.2",
     "vite": "^5.4.11"

@@ -1,8 +1,8 @@
 // MrMilk AI × Pomelli Bridge — popup.js
 
-const BRIDGE_URL = 'http://localhost:3456';
+const BRIDGE_URL = 'http://192.168.101.216:3456';
 const POMELLI_URL = 'https://labs.google.com/pomelli';
-const APP_URL = 'http://localhost:5000';
+const APP_URL = 'http://192.168.101.216:8100';
 
 let isBridgeOnline = false;
 let refreshTimer = null;
@@ -12,6 +12,7 @@ const $ = id => document.getElementById(id);
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  bindPopupActions();
   checkBridgeStatus();
   loadStoredState();
   refreshTimer = setInterval(checkBridgeStatus, 5000);
@@ -19,6 +20,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // Listen for state updates from background
   chrome.runtime.onMessage.addListener(handleStateUpdate);
 });
+
+function bindPopupActions() {
+  $('copy-cmd')?.addEventListener('click', copyCommand);
+  $('btn-app')?.addEventListener('click', openApp);
+  $('btn-pomelli')?.addEventListener('click', openPomelli);
+  $('btn-refresh')?.addEventListener('click', refreshStatus);
+  $('btn-clear-jobs')?.addEventListener('click', clearJobs);
+}
 
 // ─── Bridge health check ──────────────────────────────────────────────────────
 async function checkBridgeStatus() {
@@ -180,7 +189,6 @@ function copyCommand() {
     setTimeout(() => { el.textContent = orig; }, 2000);
   });
 }
-window.copyCommand = copyCommand;
 
 // ─── Button actions ───────────────────────────────────────────────────────────
 function openApp() {
@@ -206,11 +214,6 @@ function clearJobs() {
     updateJobBadge('idle');
   });
 }
-
-window.openApp = openApp;
-window.openPomelli = openPomelli;
-window.refreshStatus = refreshStatus;
-window.clearJobs = clearJobs;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function formatTime(isoString) {

@@ -22,3 +22,4 @@ backend/.runtime/
 backend/backend/
 backend/.cache/
 .claude/
+recordings/

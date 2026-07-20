@@ -1,7 +1,8 @@
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 
+from ...auth import AuthUser, require_permission
 from ...config import get_settings
 from ...db import get_db_last_error, is_db_available, is_db_configured, session_scope
 from ...schemas import ImportHistoryItem, ImportHistoryResponse, ImportIngestResponse, ImportProfileResponse
@@ -21,14 +22,9 @@ from ...services.storage import save_import_copy
 router = APIRouter(prefix="/api/imports", tags=["imports"])
 
 
-def _ensure_upload_role(actor_role: str | None) -> str:
+def _ensure_upload_user(actor: AuthUser) -> str:
     settings = get_settings()
-    role = (actor_role or "").strip().lower()
-    if not role:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Upload role header is required.",
-        )
+    role = actor.role.strip().lower()
     if role not in settings.upload_allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -38,7 +34,11 @@ def _ensure_upload_role(actor_role: str | None) -> str:
 
 
 @router.post("/profile", response_model=ImportProfileResponse)
-async def profile_import(file: UploadFile = File(...)) -> ImportProfileResponse:
+async def profile_import(
+    file: UploadFile = File(...),
+    actor: AuthUser = Depends(require_permission("imports:write")),
+) -> ImportProfileResponse:
+    _ensure_upload_user(actor)
     payload = await file.read()
     if not payload:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
@@ -78,7 +78,10 @@ async def profile_import(file: UploadFile = File(...)) -> ImportProfileResponse:
 
 
 @router.get("/history", response_model=ImportHistoryResponse)
-def import_history(limit: int = 50) -> ImportHistoryResponse:
+def import_history(
+    limit: int = 50,
+    _actor: AuthUser = Depends(require_permission("imports:read")),
+) -> ImportHistoryResponse:
     settings = get_settings()
     if not is_db_configured():
         raise HTTPException(
@@ -132,7 +135,7 @@ async def ingest_import(
     file: UploadFile = File(...),
     snapshot_kind: str = Form(default="full"),
     confirm_replace: bool = Form(default=False),
-    x_mrmilk_role: str | None = Header(default=None, alias="X-MrMilk-Role"),
+    actor: AuthUser = Depends(require_permission("imports:write")),
 ) -> ImportIngestResponse:
     if snapshot_kind != "full":
         raise HTTPException(
@@ -149,7 +152,7 @@ async def ingest_import(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Database is configured but not reachable. {get_db_last_error()}",
         )
-    _ensure_upload_role(x_mrmilk_role)
+    _ensure_upload_user(actor)
 
     payload = await file.read()
     if not payload:
@@ -217,9 +220,34 @@ async def ingest_import(
 from ...services import sales_import as _sales
 
 
+async def _read_upload_with_cap(file: UploadFile) -> bytes:
+    """Read an UploadFile in chunks, rejecting anything over MAX_UPLOAD_BYTES.
+    Prevents a single malicious upload from OOMing the worker process."""
+    cap = _sales.MAX_UPLOAD_BYTES
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)  # 1 MB
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Upload exceeds {cap // (1024 * 1024)} MB cap. Split the export or contact ops.",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @router.post("/sales/profile")
-async def profile_sales(file: UploadFile = File(...)) -> dict:
-    payload = await file.read()
+async def profile_sales(
+    file: UploadFile = File(...),
+    actor: AuthUser = Depends(require_permission("imports:write")),
+) -> dict:
+    # Role-gate profile too — it's a full parse, same expense as preview.
+    _ensure_upload_user(actor)
+    payload = await _read_upload_with_cap(file)
     if not payload:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
     return _sales.profile(payload, file.filename or "sales.csv")
@@ -230,10 +258,10 @@ async def commit_sales(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     confirm_replace: str = Form("false"),
-    actor_role: str | None = Header(default=None, alias="X-MrMilk-Role"),
+    actor: AuthUser = Depends(require_permission("imports:write")),
 ) -> dict:
-    role = _ensure_upload_role(actor_role)
-    payload = await file.read()
+    role = _ensure_upload_user(actor)
+    payload = await _read_upload_with_cap(file)
     if not payload:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
 
@@ -290,6 +318,130 @@ async def commit_sales(
 
 
 @router.get("/sales/status")
-async def sales_status() -> dict:
+async def sales_status(_actor: AuthUser = Depends(require_permission("imports:read"))) -> dict:
     meta = _sales.read_meta()
     return {"current": meta, "has_data": meta is not None}
+
+
+# ----------------------------------------------------------------------
+# Append mode — non-destructive merge of a new 2-month export into the
+# existing dataset. See sales_import.analyze_for_append / commit_append
+# for the dedup-key + strategy semantics.
+# ----------------------------------------------------------------------
+@router.post("/sales/append/preview")
+async def preview_sales_append(
+    file: UploadFile = File(...),
+    actor: AuthUser = Depends(require_permission("imports:write")),
+) -> dict:
+    """Dry-run: parse the new file, compare with existing parquet, return a diff
+    the UI can render before commit. Does not write anything.
+
+    Role-gated: preview triggers a full file parse + dedup against existing
+    data — expensive enough that we don't want unauthenticated callers
+    triggering it. Same role rules as the actual commit.
+    """
+    _ensure_upload_user(actor)
+    payload = await _read_upload_with_cap(file)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
+    result = _sales.analyze_for_append(payload, file.filename or "sales.csv")
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Could not analyze the sales file.",
+                "error": result.get("error"),
+                "detail": result.get("detail"),
+                "warnings": result.get("warnings", []),
+            },
+        )
+    return result
+
+
+@router.post("/sales/append")
+async def commit_sales_append(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    strategy: str = Form("skip"),  # "skip" (safe default) | "replace"
+    confirm_partial: str = Form("false"),
+    actor: AuthUser = Depends(require_permission("imports:write")),
+) -> dict:
+    """Append-merge a 2-month export into the existing sales dataset.
+
+    strategy:
+      - 'skip'    → on collision (same date/customer_id/product_id/mobile), keep
+                    the existing row. Adds only truly new rows. SAFE DEFAULT.
+      - 'replace' → on collision, overwrite the existing row with the new one.
+                    Use when MilkMaster fixed an error and you're pulling
+                    the correction.
+
+    Rejects with 409 when the file looks like a PARTIAL export (e.g. one hub
+    missing) unless `confirm_partial=true`. A hub-filtered file collides with
+    nothing, so without this gate it imports "successfully" and silently
+    understates the period — exactly how May 2026 lost Rs 9.28L.
+    """
+    role = _ensure_upload_user(actor)
+    payload = await _read_upload_with_cap(file)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded sales file is empty.")
+
+    strategy_clean = (strategy or "skip").strip().lower()
+    if strategy_clean not in ("skip", "replace"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"strategy must be 'skip' or 'replace', got {strategy!r}.",
+        )
+
+    result = _sales.commit_append(
+        payload, file.filename or "sales.csv",
+        strategy=strategy_clean,
+        confirm_partial=confirm_partial.strip().lower() == "true",
+    )
+    if not result.get("ok"):
+        # A partial export is a distinct, recoverable case: the operator can
+        # re-export with all hubs, or deliberately override. 409 (not 400) so
+        # the UI can tell "fix your file" apart from "this file is broken".
+        if result.get("error") == "incomplete_export":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "This looks like a PARTIAL export — importing it would silently understate the period.",
+                    "error": "incomplete_export",
+                    "issues": result.get("detail", []),
+                    "completeness": result.get("completeness"),
+                    "hint": "Re-export from MilkMaster with ALL hubs selected, or re-submit with confirm_partial=true if the filter was intentional.",
+                },
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": "Sales append failed.",
+                "error": result.get("error"),
+                "detail": result.get("detail"),
+                "warnings": result.get("warnings", []),
+            },
+        )
+
+    def _rewarm() -> None:
+        try:
+            with session_scope() as s:
+                _sales.schedule_embedding_rewarm(s)
+        except Exception:  # noqa: BLE001
+            pass
+
+    background_tasks.add_task(_rewarm)
+
+    summary = result["meta"].get("append_summary") or {}
+    added = summary.get("rows_added", 0)
+    dups = summary.get("duplicates_detected", 0)
+    return {
+        "ok": True,
+        "role": role,
+        "meta": result["meta"],
+        "message": (
+            f"Sales report appended: {added:,} new rows added"
+            + (f", {dups:,} duplicates handled with '{strategy_clean}'" if dups else "")
+            + f". Dataset is now {result['meta']['row_count']:,} rows "
+            f"({result['meta']['date_range'].get('from','?')} → {result['meta']['date_range'].get('to','?')})."
+        ),
+    }

@@ -1,0 +1,3 @@
+# Rendered video + intermediate segments — large binaries, rebuildable from
+# narration.json + scenes.mjs at any time.
+recordings/

@@ -9,7 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from .api.routes.chat import router as chat_router
 from .api.routes.customers import router as customers_router
 from .api.routes.health import router as health_router
+from .api.routes.auth import router as auth_router
 from .api.routes.imports import router as imports_router
+from .api.routes.sales import router as sales_router
 from .config import get_settings
 from .db import init_db, is_db_available, is_db_configured, session_scope
 from .services.customer_analytics import warmup_records_cache
@@ -32,10 +34,11 @@ async def lifespan(_app: FastAPI):
             log = logging.getLogger(__name__)
 
             def _do_warm() -> dict[str, int]:
-                """Warm: records cache + schema summary + embedding index."""
+                """Warm: records cache + schema summary + embedding index + data dictionary."""
                 from .services.data_summary import build_schema_summary
                 from .services.embeddings import warmup as warmup_embeddings
-                out = {"records": 0, "schema_categories": 0, "embeddings": 0}
+                from .services.data_dictionary import warmup as warmup_dictionary
+                out = {"records": 0, "schema_categories": 0, "embeddings": 0, "dictionary": 0}
                 try:
                     with session_scope() as s:
                         out["records"] = warmup_records_cache(s)
@@ -52,12 +55,19 @@ async def lifespan(_app: FastAPI):
                         out["embeddings"] = warmup_embeddings(s)
                 except Exception:  # noqa: BLE001
                     pass
+                try:
+                    with session_scope() as s:
+                        out["dictionary"] = warmup_dictionary(s)
+                except Exception:  # noqa: BLE001
+                    pass
                 return out
 
             stats = await asyncio.to_thread(_do_warm)
             log.info(
-                "warmup: records=%d rows, schema=%d categories, embeddings=%d values",
-                stats.get("records", 0), stats.get("schema_categories", 0), stats.get("embeddings", 0),
+                "warmup: records=%d rows, schema=%d categories, embeddings=%d values, "
+                "dictionary=%d cols",
+                stats.get("records", 0), stats.get("schema_categories", 0),
+                stats.get("embeddings", 0), stats.get("dictionary", 0),
             )
 
         asyncio.create_task(_warm_in_background())
@@ -75,14 +85,21 @@ app.add_middleware(GZipMiddleware, minimum_size=500, compresslevel=5)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    # Allow any LAN device in 192.168.x.x or 10.x.x.x or 172.16-31.x.x on any port.
+    # This lets phones / other laptops on the same Wi-Fi open the app from the
+    # machine's LAN IP without us having to enumerate every IP+port in .env.
+    # Production deploys override allow_origins with the real domain anyway.
+    allow_origin_regex=r"^https?://(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(imports_router)
 app.include_router(customers_router)
+app.include_router(sales_router)
 app.include_router(chat_router)
 
 

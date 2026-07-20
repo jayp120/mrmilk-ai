@@ -245,7 +245,7 @@
     <!-- Server offline alert -->
     <div class="alert" id="offline-alert">
       <strong>Bridge server not running.</strong> Start it with:
-      <code id="copy-cmd" onclick="copyCommand()">cd bridge-server && npm start</code>
+      <code id="copy-cmd">cd bridge-server && npm start</code>
       <div class="copy-hint">Click command to copy</div>
     </div>
 
@@ -290,19 +290,19 @@
 
     <!-- Action buttons -->
     <div class="btn-row">
-      <button class="btn btn-primary" id="btn-app" onclick="openApp()">
+      <button class="btn btn-primary" id="btn-app">
         📊 Open MrMilk AI
       </button>
-      <button class="btn btn-gold" id="btn-pomelli" onclick="openPomelli()">
+      <button class="btn btn-gold" id="btn-pomelli">
         🎨 Open Pomelli
       </button>
     </div>
 
     <div class="btn-row">
-      <button class="btn btn-ghost" onclick="refreshStatus()">
+      <button class="btn btn-ghost" id="btn-refresh">
         🔄 Refresh
       </button>
-      <button class="btn btn-danger" onclick="clearJobs()">
+      <button class="btn btn-danger" id="btn-clear-jobs">
         🗑 Clear Jobs
       </button>
     </div>

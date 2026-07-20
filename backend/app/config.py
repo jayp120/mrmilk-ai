@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     e2b_api_key: str | None = Field(default=None, alias="E2B_API_KEY")
 
+    # Server-side only. The browser-side Maps JavaScript key is a SEPARATE key
+    # and lives in the root .env as VITE_GOOGLE_MAPS_API_KEY — never put the
+    # geocoding key there, it would be publicly readable from page source.
+    google_geocoding_api_key: str | None = Field(default=None, alias="GOOGLE_GEOCODING_API_KEY")
+
     allowed_origins_raw: str = Field(
         default=(
             "http://localhost:3000,http://localhost:5000,http://localhost:5173,http://localhost:4173,"
@@ -42,6 +47,10 @@ class Settings(BaseSettings):
 
     allow_local_file_fallback: bool = Field(default=True, alias="ALLOW_LOCAL_FILE_FALLBACK")
     upload_allowed_roles_raw: str = Field(default="owner,ops", alias="UPLOAD_ALLOWED_ROLES")
+    auth_enabled: bool = Field(default=False, alias="AUTH_ENABLED")
+    auth_token_secret: str | None = Field(default=None, alias="AUTH_TOKEN_SECRET")
+    auth_token_ttl_minutes: int = Field(default=720, alias="AUTH_TOKEN_TTL_MINUTES")
+    auth_users_json: str = Field(default="", alias="AUTH_USERS_JSON")
 
     @property
     def db_configured(self) -> bool:
@@ -50,6 +59,10 @@ class Settings(BaseSettings):
     @property
     def supabase_configured(self) -> bool:
         return bool(self.supabase_url and (self.supabase_service_role_key or self.supabase_secret_key))
+
+    @property
+    def geocoding_configured(self) -> bool:
+        return bool(self.google_geocoding_api_key)
 
     @property
     def upload_allowed_roles(self) -> list[str]:

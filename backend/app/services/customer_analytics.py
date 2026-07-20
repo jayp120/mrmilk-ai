@@ -53,6 +53,14 @@ def _latest_disk_records_path() -> Path | None:
     return max(paths, key=lambda p: p.stat().st_mtime)
 
 
+# Schema sanity check — when we add a new field to the record payload, every
+# disk-cached file from the old shape needs to be discarded so the next call
+# fetches fresh from Postgres with the new columns. Bumping REQUIRED_KEYS
+# automatically invalidates stale caches without us having to delete them
+# manually on every deploy.
+_REQUIRED_RECORD_KEYS = {"customer_id", "name", "mobile", "area", "hub"}
+
+
 def _disk_read(snapshot_id: str) -> list[dict] | None:
     p = _disk_path(snapshot_id)
     if not p.is_file():
@@ -61,6 +69,16 @@ def _disk_read(snapshot_id: str) -> list[dict] | None:
         with p.open("r", encoding="utf-8") as fh:
             data = json.load(fh)
         if isinstance(data, list):
+            # If the cache predates a schema bump, force a rebuild.
+            if data and not _REQUIRED_RECORD_KEYS.issubset(set(data[0].keys())):
+                logger.info(
+                    "records: disk-cache schema stale (%s), invalidating", p.name,
+                )
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None
             logger.info("records: disk-cache hit (%d rows, %s)", len(data), p.name)
             return data
     except Exception as exc:  # noqa: BLE001
@@ -647,6 +665,7 @@ def build_customer_records(session: Session, snapshot_id: str) -> list[dict]:
     # the pooler's statement_timeout. 5k rows fetches in <5s even over a
     # slow cross-region pooler — no SET LOCAL needed.
     cols = (
+        CustomerRecord.source_customer_id,
         CustomerRecord.name,
         CustomerRecord.mobile,
         CustomerRecord.area,
@@ -692,6 +711,7 @@ def build_customer_records(session: Session, snapshot_id: str) -> list[dict]:
 
     result = [
         {
+            "customer_id": r.source_customer_id or "",
             "name": r.name,
             "mobile": r.mobile,
             "area": r.area,

@@ -285,6 +285,35 @@ def find_match(session: Session, query: str, type: str = "product", top_k: int =
     if not entries:
         return {"error": "category_unindexed", "detail": f"No values indexed for {category}."}
 
+    # Substring fast-path: if the user's query is a literal substring of any
+    # indexed value (case-insensitive), surface those matches with score 1.0
+    # BEFORE consulting the embedding model. This catches plain nouns like
+    # "mango" that gemini-embedding-001 clusters near other fruits ("Papaya")
+    # instead of the actual mango products ("Mango Pulp", "Amrapali Mangoes").
+    # Embedding-only matching is great for typos and synonyms but unreliable
+    # for short literal queries — substring check is cheap, deterministic,
+    # and the right answer when the user types exactly what's in the data.
+    q_lower = query.strip().lower()
+    if q_lower:
+        substring_hits = [
+            {"value": e["value"], "score": 1.0}
+            for e in entries
+            if q_lower in str(e["value"]).lower()
+        ]
+        if substring_hits:
+            substring_hits.sort(key=lambda x: len(x["value"]))  # shortest first → most specific match
+            top = substring_hits[: max(1, int(top_k or 3))]
+            return {
+                "query": query,
+                "category": category,
+                "top_match": top[0]["value"],
+                "top_score": 1.0,
+                "high_confidence": True,
+                "matches": top,
+                "candidate_count": len(entries),
+                "match_method": "substring",
+            }
+
     # Embed the query (cached within process for repeats)
     api_key = get_settings().gemini_api_key
     if not api_key:

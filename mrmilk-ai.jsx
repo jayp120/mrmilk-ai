@@ -1,4 +1,4 @@
-import React, { startTransition, useState, useRef, useEffect, useMemo, useDeferredValue } from "react";
+import React, { startTransition, useState, useRef, useEffect, useMemo, useDeferredValue, Suspense, lazy } from "react";
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -9,6 +9,11 @@ import { GraphicComponent, GridComponent, LegendComponent, TooltipComponent, Vis
 import { CanvasRenderer } from "echarts/renderers";
 import { captureChatAudit } from "./mrmilk-chat-audit.js";
 import ContentStudio from "./src/ContentStudio.jsx";
+import DailyProductSales from "./src/components/DailyProductSales.jsx";
+// Lazy: pulls in deck.gl (~250kB) for the WebGL heat layer. Only the Delivery
+// Map tab needs it, so it should not add weight to every other tab's load.
+const SalesHeatMap = lazy(() => import("./src/components/SalesHeatMap.jsx"));
+import ReferralEngine from "./src/components/ReferralEngine.jsx";
 import ImportCenter from "./src/ImportCenter.jsx";
 import { fetchChatNotebook, fetchCustomerRecords, fetchCustomerSummary, fetchImportHistory, proxyChat, streamChatNotebook } from "./src/utils/importApi.js";
 import NotebookAnswer from "./src/chat/NotebookAnswer.jsx";
@@ -457,6 +462,7 @@ const clampConfidence = (value) => {
 
 function normalizeCustomerRecord(row = {}) {
   const mapped = {
+    customer_id: toText(row.customer_id || row.source_customer_id || row["Customer ID"] || row["Customer Id"] || row.CustomerID),
     name: toText(row.name || row.Name),
     mobile: toText(row.mobile || row.Mobile),
     area: toText(row.area || row.Area),
@@ -851,7 +857,7 @@ function buildDatasetCitations(data, dataSource, customerRows = []) {
     citations.push({
       type: "customer_row",
       source: dataSource || "Uploaded workbook",
-      reference: `${customer.name} | ${customer.mobile} | ${customer.area}`,
+      reference: `${customer.name} | ${maskMobile(customer.mobile)} | ${customer.area}`,
       note: `status=${customer.status || "Unknown"}, revenue=${customer.revenue}, wallet=${customer.wallet_balance}, orders=${customer.orders}${toText(customer.note) ? `, sales_note=${summarizeCustomerNote(customer.note, 60)}` : ""}`,
       accessed_at: accessedAt
     });
@@ -1227,7 +1233,7 @@ const inferResearchAnswer = (parsed, customerRows = []) => {
   const leadIssue = asArray(parsed.root_cause)[0];
   const leadCustomer = customerRows[0];
   const issueText = toText(leadIssue?.issue || leadIssue?.impact || "The dataset shows an immediate retention and revenue leak.");
-  const customerText = leadCustomer?.name ? `Priority proof customer: ${leadCustomer.name} (${leadCustomer.mobile}) in ${leadCustomer.area}.` : "";
+  const customerText = leadCustomer?.name ? `Priority proof customer: ${leadCustomer.name} (${maskMobile(leadCustomer.mobile)}) in ${leadCustomer.area}.` : "";
   const actionText = toText(leadAction?.action || leadAction?.expected_outcome || "Act on the top flagged customers first.");
   return [issueText, customerText, actionText].filter(Boolean).join(" ");
 };
@@ -1552,11 +1558,11 @@ const structuredToMarkdown = (s) => {
       md.push("| **Name** | **Mobile** | **Area** | **Status** | **Revenue** | **Wallet** | **Orders** | **Note** | **Why It Matters** |");
       md.push("|---|---|---|---|---|---|---|---|---|");
       previewRows.forEach((customer) => {
-        md.push(`| ${toText(customer?.name)} | ${toText(customer?.mobile)} | ${toText(customer?.area)} | ${toText(customer?.status)} | ${toInt(customer?.revenue).toLocaleString()} | ${toInt(customer?.wallet_balance).toLocaleString()} | ${toInt(customer?.orders).toLocaleString()} | ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)} |`);
+        md.push(`| ${toText(customer?.name)} | ${maskMobile(toText(customer?.mobile))} | ${toText(customer?.area)} | ${toText(customer?.status)} | ${toInt(customer?.revenue).toLocaleString()} | ${toInt(customer?.wallet_balance).toLocaleString()} | ${toInt(customer?.orders).toLocaleString()} | ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)} |`);
       });
     } else {
       previewRows.forEach((customer, index) => {
-        md.push(`${index + 1}. ${toText(customer?.name)} | ${toText(customer?.mobile)} | ${toText(customer?.area)} | ${toText(customer?.status)} | revenue ${toInt(customer?.revenue).toLocaleString()} | wallet ${toInt(customer?.wallet_balance).toLocaleString()} | note ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)}`);
+        md.push(`${index + 1}. ${toText(customer?.name)} | ${maskMobile(toText(customer?.mobile))} | ${toText(customer?.area)} | ${toText(customer?.status)} | revenue ${toInt(customer?.revenue).toLocaleString()} | wallet ${toInt(customer?.wallet_balance).toLocaleString()} | note ${summarizeCustomerNote(customer?.note, 70) || "-"} | ${toText(customer?.why_it_matters)}`);
       });
       md.push(`- Open the full proof list to inspect all ${proofRows.length.toLocaleString()} matched customers.`);
     }
@@ -1687,8 +1693,11 @@ const structuredToMarkdown = (s) => {
 
 const customerListToPlainText = (rows = []) => {
   const sanitizePlainField = (value) => toText(value).replace(/\s+/g, " ");
-  const header = ["Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
+  // Customer ID first — same column order as the CSV export so clipboard
+  // paste -> Excel matches the downloaded file 1:1.
+  const header = ["Customer ID", "Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
   const lines = asArray(rows).map((customer) => [
+    sanitizePlainField(customer?.customer_id),
     sanitizePlainField(customer?.name),
     sanitizePlainField(customer?.mobile),
     sanitizePlainField(customer?.area),
@@ -2322,6 +2331,24 @@ const COLUMN_ALIASES = {
 };
 
 const toText = (value) => (value ?? "").toString().trim();
+
+// Mask a mobile/phone string for display. Format: 98****3210 (first 2 + last 4).
+// Mirrors backend/app/services/privacy.py:mask_mobile so display is consistent
+// across AI Chat answers and the dashboard customer-proof tables.
+// Pass-through for empty/non-mobile-shaped values so search/filter still works.
+const maskMobile = (value) => {
+  if (value === null || value === undefined) return value;
+  const s = String(value).trim();
+  if (!s) return s;
+  const digits = s.replace(/[^0-9]/g, "").replace(/0$/, (m, i, str) => (s.endsWith(".0") ? "" : m));
+  // Re-derive without losing the last digit if there was no .0 suffix
+  const clean = s.endsWith(".0") ? s.replace(/[^0-9]/g, "").slice(0, -1) : s.replace(/[^0-9]/g, "");
+  if (clean.length <= 6) return s;
+  const head = clean.slice(0, 2);
+  const tail = clean.slice(-4);
+  const middle = "*".repeat(Math.max(2, clean.length - 6));
+  return `${head}${middle}${tail}`;
+};
 const toNumber = (value) => {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   const text = toText(value).replace(/,/g, "");
@@ -3337,11 +3364,12 @@ const requestModelText = async ({ provider, model, apiKey, instructions, inputTe
   return { text: result.text, usedSearch: result.used_search || false };
 };
 
-export default function App() {
+export default function App({ authUser = null, onLogout = null } = {}) {
   const initialDatasetRef = useRef(null);
   if (!initialDatasetRef.current) initialDatasetRef.current = createInitialDatasetState();
+  const authRole = ROLES[authUser?.role] ? authUser.role : "owner";
   const [tab, setTab] = useState("dash");
-  const [role, setRole] = useState("owner");
+  const [role, setRole] = useState(authRole);
   const [msgs, setMsgs] = useState([]);
   const [inp, setInp] = useState("");
   const [chatControls, setChatControls] = useState(DEFAULT_CHAT_CONTROLS);
@@ -3441,6 +3469,7 @@ export default function App() {
   const [autoPinChat, setAutoPinChat] = useState(true);
   const deferredInput = useDeferredValue(inp);
   const rc = ROLES[role].color;
+  const visibleRoleKeys = authRole === "owner" ? Object.keys(ROLES) : [authRole];
 
   const isChatNearBottom = () => {
     const el = chatScrollRef.current;
@@ -3465,6 +3494,13 @@ export default function App() {
     setPendingClarification(null);
     setChatControls((prev) => ({ ...prev, persona: ROLE_DEFAULT_PERSONA[role] || prev.persona }));
   }, [role]);
+  useEffect(() => {
+    if (authRole !== "owner") {
+      setRole(authRole);
+    } else if (!ROLES[role]) {
+      setRole("owner");
+    }
+  }, [authRole, role]);
   useEffect(() => {
     if (!FREE_PROVIDER_OPTIONS.includes(provider)) setProvider("nvidia");
   }, [provider]);
@@ -3962,6 +3998,47 @@ export default function App() {
       v: d.total ? toInt(D.total_customers) : toInt(sm[d.key]),
     }));
   }, [D.total_customers, appData]);
+
+  // "Closed Won" — Trial Not Converted customers whose real behaviour (spend
+  // or order count) already looks converted, even though MilkMaster hasn't
+  // relabelled their status yet. Rule: revenue >= Rs.495 OR orders >= 7.
+  // The base "Trial Not Converted" tile above is untouched — this is a
+  // separate, sorted view of the same underlying customers.
+  const CLOSED_WON_MIN_REVENUE = 495;
+  const CLOSED_WON_MIN_ORDERS = 7;
+  const trialNotConvertedRecords = useMemo(
+    () => customerRecords.filter((r) => isExactMilkMasterStatus(r.status, "Trial Not Converted")),
+    [customerRecords]
+  );
+  const closedWonRecords = useMemo(
+    () => trialNotConvertedRecords
+      .filter((r) => toInt(r.revenue) >= CLOSED_WON_MIN_REVENUE || toInt(r.orders) >= CLOSED_WON_MIN_ORDERS)
+      .sort((a, b) => toInt(b.revenue) - toInt(a.revenue)),
+    [trialNotConvertedRecords]
+  );
+  const closedWonPct = trialNotConvertedRecords.length
+    ? (closedWonRecords.length / trialNotConvertedRecords.length) * 100
+    : 0;
+  // Second list carved from Closed Won: customers whose last order was placed
+  // BEFORE the last 30 days — behaviourally converted but now gone quiet, so
+  // they're the win-back call list. Sorted most-recently-lapsed first (their
+  // last delivery date descending; revenue as tie-break). last_delivery is an
+  // ISO date (YYYY-MM-DD) so plain string comparison is safe. Rows with no
+  // last-delivery date are excluded (can't prove when they lapsed).
+  const closedWonLapseCutoff = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return toISODateString(d);
+  }, []);
+  const closedWonLapsedRecords = useMemo(
+    () => closedWonRecords
+      .filter((r) => {
+        const last = toText(r.last_delivery);
+        return last && last < closedWonLapseCutoff;
+      })
+      .sort((a, b) => toText(b.last_delivery).localeCompare(toText(a.last_delivery)) || toInt(b.revenue) - toInt(a.revenue)),
+    [closedWonRecords, closedWonLapseCutoff]
+  );
 
   const hubData = useMemo(() => Object.entries(appData.hub_performance || {})
     .map(([name, d]) => ({ name: name.length > 12 ? name.slice(0, 12) : name, rev: Math.round(toNumber(d?.revenue) / 100000), cust: toInt(d?.customers), full: name }))
@@ -4582,11 +4659,15 @@ export default function App() {
   };
   const exportProofCsv = (rows, label = "customer-proof") => {
     if (typeof window === "undefined") return;
-    const header = ["Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
+    // Customer ID first so the downloaded file's primary key is identifiable
+    // before the human-readable name. Mobile stays UNMASKED in downloads —
+    // that's the point of having "Export full CSV": ops needs to call them.
+    const header = ["Customer ID", "Name", "Mobile", "Area", "Hub", "Status", "Revenue", "Wallet", "Orders", "Last Delivery", "Source", "Payment Mode", "Note", "Why It Matters"];
     const escapeCsv = (value) => `"${toText(value).replace(/"/g, "\"\"")}"`;
     const csv = [
       header.join(","),
       ...asArray(rows).map((customer) => [
+        customer?.customer_id,
         customer?.name,
         customer?.mobile,
         customer?.area,
@@ -4682,6 +4763,30 @@ export default function App() {
       profileId: meta.profileId || "status"
     });
   };
+  const openClosedWonProof = (meta = {}) => openProofPanel({
+    title: "Closed Won proof (from Trial Not Converted)",
+    subtitle: `Trial Not Converted customers who have already spent Rs.${CLOSED_WON_MIN_REVENUE}+ or placed ${CLOSED_WON_MIN_ORDERS}+ orders — behaviourally converted, sorted by revenue (highest first).`,
+    customers: closedWonRecords,
+    filters: [`status:Trial Not Converted`, `revenue>=${CLOSED_WON_MIN_REVENUE} OR orders>=${CLOSED_WON_MIN_ORDERS}`],
+    source: `Dashboard | ${dataSource}`,
+    query: "closed won trial not converted customers",
+    openedFrom: "dashboard",
+    sortMode: "revenue_desc",
+    anchorId: meta.anchorId,
+    profileId: meta.profileId || "status"
+  });
+  const openClosedWonLapsedProof = (meta = {}) => openProofPanel({
+    title: "Closed Won — no order in the last 30 days",
+    subtitle: `Closed Won customers (Trial Not Converted with Rs.${CLOSED_WON_MIN_REVENUE}+ spent or ${CLOSED_WON_MIN_ORDERS}+ orders) whose last delivery was BEFORE ${closedWonLapseCutoff} — they proved real demand, then went quiet for 30+ days. Win-back list, sorted most-recently-lapsed first.`,
+    customers: closedWonLapsedRecords,
+    filters: [`status:Trial Not Converted`, `revenue>=${CLOSED_WON_MIN_REVENUE} OR orders>=${CLOSED_WON_MIN_ORDERS}`, `last_delivery<${closedWonLapseCutoff}`],
+    source: `Dashboard | ${dataSource}`,
+    query: "closed won customers with no order in last 30 days",
+    openedFrom: "dashboard",
+    sortMode: "last_delivery_desc",
+    anchorId: meta.anchorId,
+    profileId: meta.profileId || "status"
+  });
   const shouldUseKpiProofLoader = (metric = "", anchorId = "") => metric === "total" && Boolean(toText(anchorId)) && customerRecords.length >= KPI_TOTAL_PROGRESS_THRESHOLD;
   const buildKpiProofPayload = async (metric, setStage = () => {}) => {
     const rows = customerRecords;
@@ -4888,6 +4993,16 @@ export default function App() {
   };
   const proofColumns = useMemo(() => [
     {
+      accessorKey: "customer_id",
+      header: ({ column }) => (
+        <button onClick={column.getToggleSortingHandler()} style={{background:"transparent",border:"none",padding:0,color:"inherit",cursor:"pointer",fontWeight:700}}>
+          Customer ID {column.getIsSorted() === "asc" ? "↑" : column.getIsSorted() === "desc" ? "↓" : ""}
+        </button>
+      ),
+      // MilkMaster source customer id — primary cross-reference for ops
+      cell: ({ row }) => <span style={{color:"#365a7f",fontFamily:"monospace",fontSize:11}}>{toText(row.original.customer_id) || "-"}</span>
+    },
+    {
       accessorKey: "name",
       header: ({ column }) => (
         <button onClick={column.getToggleSortingHandler()} style={{background:"transparent",border:"none",padding:0,color:"inherit",cursor:"pointer",fontWeight:700}}>
@@ -4899,7 +5014,9 @@ export default function App() {
     {
       accessorKey: "mobile",
       header: "Mobile",
-      cell: ({ row }) => <span style={{color:"#8b6914",fontFamily:"monospace"}}>{toText(row.original.mobile)}</span>
+      // Display masked. Raw mobile stays in row.original.mobile and is exported
+      // in "Export full CSV" / "Export visible CSV" so ops can still call.
+      cell: ({ row }) => <span style={{color:"#8b6914",fontFamily:"monospace"}}>{maskMobile(toText(row.original.mobile))}</span>
     },
     {
       accessorKey: "area",
@@ -5597,18 +5714,31 @@ export default function App() {
             <span title={BRAND_CONTEXT.meta} style={{background:"#07406912",border:"1px solid #a7c1db",borderRadius:20,padding:"2px 8px",color:"#074069",fontSize:9}}>Brand DNA synced from {BRAND_CONTEXT.source}</span>
           </div>
         </div>
-        <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
-          {Object.entries(ROLES).map(([k,r])=>(
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",justifyContent:"flex-end",alignItems:"center"}}>
+          {authUser && (
+            <span title={`Signed in as ${authUser.username}`} style={{background:"#f4f9ff",border:"1px solid #c7d9ea",borderRadius:999,color:"#365a7f",padding:"5px 10px",fontSize:10,fontWeight:700}}>
+              {authUser.name || authUser.username} · {ROLES[authRole]?.label || authRole}
+            </span>
+          )}
+          {visibleRoleKeys.map((k)=>{
+            const r = ROLES[k];
+            return (
             <button key={k} onClick={()=>setRole(k)} style={{background:role===k?r.color+"20":"#ffffff",border:`1px solid ${role===k?r.color+"66":"#c7d7e8"}`,borderRadius:7,color:role===k?r.color:"#567796",padding:"4px 9px",cursor:"pointer",fontSize:10,fontFamily:"'Montserrat', sans-serif",fontWeight:600}}>
               {r.icon} {r.label}
             </button>
-          ))}
+            );
+          })}
+          {typeof onLogout === "function" && (
+            <button onClick={onLogout} style={{background:"#ffffff",border:"1px solid #e6c4bc",borderRadius:7,color:"#a14b39",padding:"4px 9px",cursor:"pointer",fontSize:10,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
+              Sign out
+            </button>
+          )}
         </div>
       </div>
 
       {/* Tabs */}
       <div style={{display:"flex",borderBottom:"1px solid #c4daee",background:"#ffffff",flexShrink:0,position:"relative",zIndex:1}}>
-        {[{id:"dash",label:"Dashboard"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
+        {[{id:"dash",label:"Dashboard"},{id:"sales",label:"Daily Sales"},{id:"heatmap",label:"Delivery Map"},{id:"referrals",label:"Referrals"},{id:"imports",label:"Import Ops"},{id:"calendar",label:"Calendar OS"},{id:"studio",label:"Content Studio"},{id:"chat",label:`AI Chat${msgs.length?" ("+msgs.filter(m=>m.role==="assistant").length+")":""}`}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} style={{background:"transparent",border:"none",borderBottom:`3px solid ${tab===t.id?rc:"transparent"}`,color:tab===t.id?rc:"#4d5b78",padding:"11px 18px",cursor:"pointer",fontSize:13,fontFamily:"'Montserrat', sans-serif",fontWeight:700}}>
             {t.label}
           </button>
@@ -5763,6 +5893,36 @@ export default function App() {
             </div>
           </div>
 
+          {/* Closed Won — Trial Not Converted customers who already behave like
+              converted customers (spend or order count), even though MilkMaster
+              hasn't relabelled them. Separate from the fixed 13-bucket panel
+              above; that panel's "Trial Not Converted" tile and count are
+              untouched — this is a sorted, filtered view of the same customers. */}
+          <div style={{background:"linear-gradient(160deg, #ffffff, #f4fbf6)",border:"1px solid #cfe7d5",borderRadius:16,padding:"18px",boxShadow:"0 16px 34px rgba(26,102,55,0.06)",marginBottom:14}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,flexWrap:"wrap"}}>
+              <div>
+                <div style={{color:"#1f5b34",fontSize:15,fontWeight:800}}>Closed Won <span style={{color:"#4e7d5f",fontWeight:600}}>(from Trial Not Converted)</span></div>
+                <div style={{color:"#5e8f6f",fontSize:12,marginTop:4,lineHeight:1.55,maxWidth:640}}>
+                  What this list is: out of your <b>{trialNotConvertedRecords.length.toLocaleString()}</b> "Trial Not Converted" customers, these have <b>Rs.{CLOSED_WON_MIN_REVENUE}+ spent</b> OR <b>{CLOSED_WON_MIN_ORDERS}+ orders</b> — real converted behaviour, even though MilkMaster still labels them Trial Not Converted. Sorted highest revenue first. The gold tile narrows this to those whose <b>last order was placed more than 30 days ago</b> — they proved demand, then went quiet — your win-back call list, sorted most-recently-lapsed first. The "Trial Not Converted" tile above is unchanged.
+                </div>
+              </div>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",flexShrink:0}}>
+                <button onClick={() => openClosedWonProof({ anchorId: "kpi-closed-won" })} style={{textAlign:"left",background:"#ffffff",border:"1px solid #bde0c7",borderLeft:"4px solid #2fa65d",borderRadius:12,padding:"12px 18px",cursor:"pointer",boxShadow:"0 8px 18px rgba(26,102,55,0.08)",minWidth:160}}>
+                  <div style={{color:"#2fa65d",fontSize:22,fontWeight:800,lineHeight:1.1}}>{closedWonRecords.length.toLocaleString()}</div>
+                  <div style={{color:"#1f5b34",fontSize:12,fontWeight:700,marginTop:3}}>Closed Won customers</div>
+                  <div style={{color:"#5e8f6f",fontSize:11,marginTop:3}}>{closedWonPct.toFixed(1)}% of Trial Not Converted</div>
+                  <div style={{color:"#4e7d5f",fontSize:9,textTransform:"uppercase",letterSpacing:0.7,fontWeight:700,marginTop:6}}>Proof rows</div>
+                </button>
+                <button onClick={() => openClosedWonLapsedProof({ anchorId: "kpi-closed-won-lapsed" })} title="Closed Won customers whose last order was placed more than 30 days ago — proved demand, then went quiet. Win-back list." style={{textAlign:"left",background:"#ffffff",border:"1px solid #ead4ab",borderLeft:"4px solid #d2ab67",borderRadius:12,padding:"12px 18px",cursor:"pointer",boxShadow:"0 8px 18px rgba(139,104,20,0.08)",minWidth:160}}>
+                  <div style={{color:"#b98a2e",fontSize:22,fontWeight:800,lineHeight:1.1}}>{closedWonLapsedRecords.length.toLocaleString()}</div>
+                  <div style={{color:"#8b6914",fontSize:12,fontWeight:700,marginTop:3}}>No order in last 30 days</div>
+                  <div style={{color:"#a07b2d",fontSize:11,marginTop:3}}>last delivery before {closedWonLapseCutoff}</div>
+                  <div style={{color:"#a07b2d",fontSize:9,textTransform:"uppercase",letterSpacing:0.7,fontWeight:700,marginTop:6}}>Win-back list</div>
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Production charts */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(360px,1fr))",gap:12,marginBottom:14}}>
             <div style={{background:"#ffffff",border:"1px solid #d7e3f0",borderRadius:16,padding:"18px",boxShadow:"0 16px 34px rgba(7,64,105,0.05)"}}>
@@ -5840,6 +6000,29 @@ export default function App() {
               </table>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* DAILY SALES TAB */}
+      {tab==="sales" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <DailyProductSales />
+        </div>
+      )}
+
+      {/* DELIVERY HEAT MAP TAB */}
+      {tab==="heatmap" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <Suspense fallback={<div style={{color:"#6f86aa",fontSize:13,padding:20}}>Loading delivery map…</div>}>
+            <SalesHeatMap />
+          </Suspense>
+        </div>
+      )}
+
+      {/* REFERRAL ENGINE TAB */}
+      {tab==="referrals" && (
+        <div style={{flex:1,overflowY:"auto",padding:"20px 22px 24px",position:"relative",zIndex:1}}>
+          <ReferralEngine />
         </div>
       )}
 

@@ -1,9 +1,9 @@
 // MrMilk AI x Pomelli Bridge - background.js (Service Worker)
 // Owns job orchestration and final delivery back to the bridge server.
 
-const BRIDGE_URL = "http://localhost:3456";
+const BRIDGE_URL = "http://192.168.101.216:3456";
 const POMELLI_URL = "https://labs.google.com/pomelli";
-const APP_URL = "http://localhost:5000";
+const APP_URL = "http://192.168.101.216:8100";
 const POLL_INTERVAL_MS = 3000;
 const REQUEST_TIMEOUT_MS = 10000;
 const GENERATION_TIMEOUT_MS = 240000;

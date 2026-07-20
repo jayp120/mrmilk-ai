@@ -3,14 +3,17 @@ from __future__ import annotations
 import json as _json
 
 import httpx
-from fastapi import APIRouter, Header, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from ...auth import AuthUser, require_permission
 from ...config import get_settings
 from ...db import is_db_available, is_db_configured, session_scope
 from ...services.ai_agent import run_agent, stream_agent
 from ...services.ai_schema import NotebookResponse
+from ...services.report_builder import get_report_path
+from ...services.query_memory import record_thumb
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -116,6 +119,7 @@ async def _call_openai_compat(url: str, model: str, api_key: str, request: ChatR
 async def chat(
     request: ChatRequest,
     x_llm_api_key: str | None = Header(default=None, alias="X-LLM-Api-Key"),
+    _actor: AuthUser = Depends(require_permission("chat:use")),
 ) -> ChatResponse:
     provider = request.provider.strip().lower()
     model = (request.model or DEFAULT_MODELS.get(provider, "")).strip()
@@ -147,7 +151,10 @@ class NotebookChatRequest(BaseModel):
 
 
 @router.post("/notebook", response_model=NotebookResponse)
-async def chat_notebook(request: NotebookChatRequest) -> NotebookResponse:
+async def chat_notebook(
+    request: NotebookChatRequest,
+    _actor: AuthUser = Depends(require_permission("chat:use")),
+) -> NotebookResponse:
     if not is_db_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -190,7 +197,10 @@ def _sse_line(event: dict) -> str:
 
 
 @router.post("/notebook/stream")
-async def chat_notebook_stream(request: NotebookChatRequest):
+async def chat_notebook_stream(
+    request: NotebookChatRequest,
+    _actor: AuthUser = Depends(require_permission("chat:use")),
+):
     if not is_db_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -229,3 +239,45 @@ async def chat_notebook_stream(request: NotebookChatRequest):
             "Connection": "keep-alive",
         },
     )
+
+
+# ----------------------------------------------------------------------
+# Report PDF download — served by report_builder.render_report_pdf().
+# ----------------------------------------------------------------------
+@router.get("/reports/{file_name}")
+def download_report(
+    file_name: str,
+    _actor: AuthUser = Depends(require_permission("reports:read")),
+) -> FileResponse:
+    path = get_report_path(file_name)
+    if not path:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=file_name,
+        headers={"Content-Disposition": f'inline; filename="{file_name}"'},
+    )
+
+
+# ----------------------------------------------------------------------
+# Thumbs feedback for query_memory rows — used to demote bad answers
+# from future few-shot retrieval and to surface good ones for fine-tuning.
+# ----------------------------------------------------------------------
+class ThumbRequest(BaseModel):
+    memory_id: int
+    direction: str  # "up" or "down"
+
+
+@router.post("/feedback")
+def post_feedback(
+    request: ThumbRequest,
+    _actor: AuthUser = Depends(require_permission("feedback:write")),
+) -> dict[str, bool]:
+    if request.direction not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+    if not is_db_available():
+        raise HTTPException(status_code=503, detail="DB not available")
+    with session_scope() as session:
+        ok = record_thumb(session, request.memory_id, request.direction)
+    return {"ok": ok}
